@@ -49,11 +49,12 @@ export function assertMachineDirectRoute(value: string | URL): void {
  * @param input - Request URL or Request object.
  * @param init - Fetch-compatible request fields.
  * @param beforeSend - Final authorization gate after destination and body preparation.
+ * @param deadline - Bound the complete OAuth exchange or just MCP connection setup.
  * @returns A streaming response. Caller owns body cancellation.
  */
 export async function machineFetch(input: string | URL | Request, init: RequestInit = {},
-  beforeSend?: () => Promise<void>): Promise<Response> {
-  return requestMachine(input, init, undefined, beforeSend)
+  beforeSend?: () => Promise<void>, deadline: 'oauth' | 'mcp' = 'oauth'): Promise<Response> {
+  return requestMachine(input, init, undefined, beforeSend, deadline)
 }
 
 /** Test-only exact-origin loopback transport with an explicit ephemeral CA.
@@ -63,19 +64,23 @@ export async function machineFetch(input: string | URL | Request, init: RequestI
 export function createTestMachineFetch(options: { origin: string; ca: string }): typeof machineFetch {
   const url = machineUrl(options.origin)
   if (process.env.NODE_ENV !== 'test' || url.origin !== options.origin || !['localhost', '127.0.0.1'].includes(url.hostname) || !options.ca) throw new Error('test_transport_forbidden')
-  return (input, init = {}, beforeSend) => requestMachine(input, init, options, beforeSend)
+  return (input, init = {}, beforeSend, deadline = 'oauth') => requestMachine(input, init, options, beforeSend, deadline)
 }
 
 async function requestMachine(input: string | URL | Request, init: RequestInit, test?: { origin: string; ca: string },
-  beforeSend?: () => Promise<void>): Promise<Response> {
+  beforeSend?: () => Promise<void>, deadline: 'oauth' | 'mcp' = 'oauth'): Promise<Response> {
   if (!(input instanceof Request)) machineUrl(String(input))
   const outgoing = new Request(input, { ...init, redirect: 'manual', credentials: 'omit' })
+  const budget = new AbortController()
+  const timer = setTimeout(() => budget.abort(), 30_000)
+  timer.unref()
+  const stopTimer = () => clearTimeout(timer)
   try {
     if (outgoing.headers.has('host')) throw new Error('managed_authentication_header')
     const url = machineUrl(outgoing.url)
     assertMachineDirectRoute(url)
     if (test && url.origin !== test.origin) throw new Error('unsafe_target')
-    const signal = AbortSignal.any([outgoing.signal, AbortSignal.timeout(30000)])
+    const signal = AbortSignal.any([outgoing.signal, budget.signal])
     if (signal.aborted) throw new Error('network_failure')
     const addresses = await withAbort(lookup(url.hostname.replace(/^\[|\]$/gu, ''), { all: true, verbatim: true }), signal)
     if (addresses.length > 32 || addresses.some(value => !publicAddress(value.address) && !(test && url.origin === test.origin && (value.address === '::1' || /^127(?:\.[0-9]{1,3}){3}$/u.test(value.address))))) throw new Error('unsafe_target')
@@ -103,10 +108,13 @@ async function requestMachine(input: string | URL | Request, init: RequestInit, 
         if ([204, 205, 304].includes(status)) { response.resume(); resolve(new Response(null, { status, headers })); return }
         resolve(new Response(Readable.toWeb(response) as ReadableStream<Uint8Array>, { status, headers }))
       })
+      if (deadline === 'mcp') req.once('socket', socket => socket.once('secureConnect', stopTimer))
+      req.once('close', stopTimer)
       req.on('error', () => reject(new Error('network_failure')))
       req.end(body)
     })
   } catch (error) {
+    stopTimer()
     try { await outgoing.body?.cancel() } catch { /* The body reader owns its read failure and may already be closed. */ }
     if (error instanceof Error && ['unsafe_target', 'invalid_target', 'request_too_large', 'managed_authentication_header', 'proxy_egress_unsupported'].includes(error.message)) throw error
     throw new Error('network_failure')

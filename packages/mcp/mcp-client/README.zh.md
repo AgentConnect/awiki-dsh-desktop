@@ -82,6 +82,8 @@ kind: "package-reference"
 
 Host 插件可用 `new McpSigningProviderRegistry(ctx).register(name, provider)` 注册签名器，再通过 `authentication.provider` 按名称选用。类型入口导出 `McpSigningProvider` 和 `McpSigningLease`。签名器收到原始 MCP Loader Context 与已校验的请求目标。移除 Provider 后，其租约失效。资源公布多个 issuer 时须明确选择。Token 到期或被拒绝后，下一次独立操作可申请新 Token。已发出的业务操作不会因认证修复自动重放。
 
+CIMD 对发现、Token 交换和 MCP 连接建立使用短网络期限。连接建立后，MCP 调用的响应头和正文都遵循操作期限。若调用期间签名绑定发生变化，客户端会丢弃该绑定的结果。请通过 `cordis.yml` 加载 MCP 客户端来验证 CIMD 连接。独立的 `probeServer()` 会在打开传输前报告暂不支持 CIMD。
+
 ### 工具命名与共存
 
 模型看到每个工具都带有稳定的服务器限定名称：`mcp__<serverName>__<rawName>`，例如 `mcp__github__create_issue`——与 Claude Code 和 Codex 使用的命名形态相同。只要服务器保持相同的工具名称，名称就保持不变，因此会话历史与权限规则在重启和重载后仍然有效。两个服务器可以同时提供名为 `search` 的工具，分别以 `mcp__github__search` 和 `mcp__web__search` 共存。

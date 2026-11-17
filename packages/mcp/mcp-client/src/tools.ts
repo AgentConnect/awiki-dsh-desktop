@@ -31,6 +31,8 @@ import type { MachineOutputProtection } from './machine-output.ts'
 export interface ToolBridgeOptions {
   /** Host-only guard for machine-authenticated listings and results. */
   protection?: MachineOutputProtection
+  /** Initial listing shares the handshake's binding. */
+  startupBinding?: () => Promise<void>
   serverName: string
   toolCallTimeoutMs: number
   /** Generation cancellation combined with each tool execution's signal. */
@@ -142,13 +144,19 @@ export async function syncTools(
   previous: ToolDisposers,
   eligible: () => boolean = () => true,
 ): Promise<ToolDisposers> {
+  if (opts.protection && !opts.startupBinding) {
+    return opts.protection.run(assertActive => publishTools(client, ctx, opts, previous, eligible, assertActive))
+  }
+  return publishTools(client, ctx, opts, previous, eligible, opts.startupBinding)
+}
+
+async function publishTools(client: Client, ctx: Context, opts: ToolBridgeOptions, previous: ToolDisposers,
+  eligible: () => boolean, assertActive?: () => Promise<void>): Promise<ToolDisposers> {
   // Phase 1: fetch and build the next generation without touching the registry.
   const definitions = new Map<string, ToolDefinition>()
-  await opts.protection?.prepare?.()
   const response = client.getServerCapabilities()?.tools === undefined
     ? { tools: [] }
     : await client.listTools(undefined, { cacheMode: 'refresh', signal: opts.signal })
-  await opts.protection?.assertActive()
   const outputValidators = new AjvJsonSchemaValidator()
   for (const advertisedTool of response.tools) {
     const tool = opts.protection ? opts.protection.sanitize(advertisedTool) : advertisedTool
@@ -167,7 +175,7 @@ export async function syncTools(
       const message = `Tool "${tool.name}" returned an invalid MCP result: ${reason}`
       return new McpToolError(opts.redact === undefined ? message : opts.redact(message), 'MCP_INVALID_RESULT')
     }
-    definitions.set(publicName, createMcpToolDefinition(ctx, {
+    const definition = createMcpToolDefinition(ctx, {
       name: publicName,
       rawName: tool.name,
       description: tool.description ?? '',
@@ -183,15 +191,12 @@ export async function syncTools(
           throw invalidResult(`its output schema cannot be compiled: ${outputCheck.compileError}`)
         }
         let result: Awaited<ReturnType<Client['callTool']>>
-        const release = opts.protection?.begin()
         try {
-          await opts.protection?.prepare?.()
           result = await client.callTool(
             { name: tool.name, arguments: args },
             { signal: AbortSignal.any([execution.signal, opts.signal]),
               timeout: opts.toolCallTimeoutMs, toolDefinition: callDefinition },
           )
-          await opts.protection?.assertActive()
           if (opts.protection) result = opts.protection.sanitize(result)
         } catch (error) {
           // The SDK reports an aborted signal as a request timeout; cancellation
@@ -199,7 +204,7 @@ export async function syncTools(
           execution.signal.throwIfAborted()
           opts.signal.throwIfAborted()
           throw mcpRequestError(error, `tool "${tool.name}"`, opts.redact)
-        } finally { release?.() }
+        }
         if (result.isError !== true) {
           const failure = outputCheck === undefined ? undefined : outputCheck.check(result.structuredContent)
           if (failure !== undefined) throw invalidResult(failure)
@@ -208,12 +213,29 @@ export async function syncTools(
         if (opts.redact === undefined) return result
         return { isError: true, content: [{ type: 'text', text: opts.redact(extractText(result.content as JsonValue[], tool.name)) }] }
       },
-    }))
+    })
+    const protection = opts.protection
+    if (protection) {
+      const execute = definition.execute
+      definitions.set(publicName, { ...definition, execute: (args, execution) => protection.run(async (check) => {
+        const value = await Promise.resolve().then(() => execute(args, execution)).catch(async (error) => {
+          execution.signal.throwIfAborted()
+          opts.signal.throwIfAborted()
+          await check()
+          throw error
+        })
+        await check()
+        execution.signal.throwIfAborted()
+        opts.signal.throwIfAborted()
+        return value
+      }) })
+    } else definitions.set(publicName, definition)
   }
 
   // Phase 2: swap generations — but only for a generation still entitled to
   // publish. The listing above is the slow await an abandonment can overtake;
   // state is published at its commit point or not at all.
+  await assertActive?.()
   if (!eligible()) return previous
   for (const dispose of previous.values()) dispose()
   const disposers: ToolDisposers = new Map()

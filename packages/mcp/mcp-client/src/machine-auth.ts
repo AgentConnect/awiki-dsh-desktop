@@ -1,7 +1,9 @@
 /** Target-bound CIMD Token exchange and authenticated SDK transport. */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import type { Context } from '@deepseek-ai/cordis'
+import { isJSONRPCRequest, type Transport } from '@modelcontextprotocol/client'
 import { McpLocalError, McpToolError } from './diagnostic.ts'
 import { discoverMachineTarget } from './machine-discovery.ts'
 import { MACHINE_TOKEN_MAX_LIFETIME } from './machine-history.ts'
@@ -26,6 +28,7 @@ interface Binding {
 export class MachineAuthenticationSession {
   private readonly store: MachineConnectionStore
   private readonly redactor = new MachineBearerRedactor()
+  private readonly operation = new AsyncLocalStorage<{ binding: Binding; signal: AbortSignal }>()
   private readonly scopes: readonly string[]
   private readonly builtIn?: ReturnType<typeof credentialSigner>
   private readonly signal: AbortSignal
@@ -114,6 +117,10 @@ export class MachineAuthenticationSession {
 
   private async assertBinding(binding: Binding): Promise<void> {
     await this.checkLease(binding.lease)
+    this.assertCurrent(binding)
+  }
+
+  private assertCurrent(binding: Binding): void {
     this.signal.throwIfAborted()
     if (this.binding !== binding || binding.target.expiresAt <= Date.now() || this.lookupProvider().generation !== binding.registration) {
       throw new McpLocalError('MCP authentication binding is no longer active', 'MCP_MACHINE_SIGNER_UNAVAILABLE')
@@ -193,7 +200,7 @@ export class MachineAuthenticationSession {
   /** Authenticate exactly one SDK request using the current immutable binding. */
   readonly fetch: typeof fetch = async (input, init) => {
     const original = new Request(input, init)
-    const binding = await this.currentBinding()
+    const binding = this.operation.getStore()?.binding ?? await this.currentBinding()
     const signal = AbortSignal.any([this.signal, original.signal])
     const request = new Request(original, { signal })
     if (request.url !== new URL(binding.target.resource).href
@@ -201,6 +208,7 @@ export class MachineAuthenticationSession {
       throw new McpLocalError('CIMD requests must use the configured MCP URL and Host-owned credentials', 'MCP_MACHINE_CONFIGURATION')
     }
     signal.throwIfAborted()
+    await this.assertBinding(binding)
     const token = await this.acquire(binding)
     request.headers.set('authorization', `Bearer ${token.token}`)
     const check = async () => {
@@ -212,7 +220,7 @@ export class MachineAuthenticationSession {
     await check()
     this.redactor.remember(token.token, token.acquiredAt, token.expiresAt - token.acquiredAt)
     this.redactor.observe(await this.store.rememberSent(binding.generation, binding.partition, token, check))
-    const response = await this.send(request, undefined, check)
+    const response = await this.send(request, undefined, check, 'mcp')
     if (response.status === 401) {
       await response.body?.cancel()
       await this.store.invalidate(binding.generation, token)
@@ -227,17 +235,40 @@ export class MachineAuthenticationSession {
     return response
   }
 
+  /**
+   * Close a legacy CIMD request stream when the SDK operation settles.
+   * @param transport - This connection's Streamable HTTP transport.
+   */
+  bindTransport(transport: Transport): void {
+    const send = transport.send.bind(transport)
+    transport.send = (message, options) => {
+      const operation = this.operation.getStore()
+      // Cancellation notifications and subscriptions retain the transport lifetime.
+      if (operation && !options?.requestSignal && isJSONRPCRequest(message)
+        && (message.method === 'tools/call' || message.method === 'tools/list' || message.method.startsWith('resources/'))) {
+        return send(message, { ...options, requestSignal: operation.signal })
+      }
+      return send(message, options)
+    }
+  }
+
   /** Protect model-visible results and validate authorization before publishing them. */
   readonly protection: MachineOutputProtection = {
-    prepare: async () => { await this.currentBinding(); await this.refreshHistory() },
-    begin: () => this.redactor.begin(),
     sanitize: value => this.redactor.sanitize(value),
-    assertActive: async () => {
-      const binding = this.binding
-      if (!binding) throw new McpLocalError('MCP signing provider is unavailable', 'MCP_MACHINE_SIGNER_UNAVAILABLE')
-      await this.assertBinding(binding)
-      await this.refreshHistory()
-      await this.store.assertCurrent(binding.generation, binding.partition)
+    run: async (operation) => {
+      const release = this.redactor.begin()
+      const lifetime = new AbortController()
+      try {
+        const binding = await this.currentBinding()
+        const assertActive = async () => {
+          await this.refreshHistory()
+          await this.assertBinding(binding)
+          await this.store.assertCurrent(binding.generation, binding.partition)
+          this.assertCurrent(binding)
+        }
+        await this.refreshHistory()
+        return await this.operation.run({ binding, signal: lifetime.signal }, operation, assertActive)
+      } finally { lifetime.abort(); release() }
     },
   }
 }

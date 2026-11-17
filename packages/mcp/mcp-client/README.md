@@ -82,6 +82,8 @@ For `authentication.provider: credentials`, set `credentialRef` to a P-256 PKCS#
 
 Host plugins can register an alternate signer with `new McpSigningProviderRegistry(ctx).register(name, provider)` and select it by name in `authentication.provider`. The type entry exports `McpSigningProvider` and `McpSigningLease`. The signer receives the original MCP Loader context and the validated request target. Removing the provider invalidates its leases. Choose an issuer explicitly if the resource advertises several. The next independent operation can acquire a new Token after expiry or a rejected Token. A dispatched business operation is never replayed automatically to repair authentication.
 
+CIMD retains short network deadlines for discovery, Token exchange, and MCP connection establishment. Once connected, MCP calls use the operation deadline for both response headers and content. If a signing binding changes during a call, the client discards results from that binding. Validate a CIMD connection by loading the MCP client in `cordis.yml`. The standalone `probeServer()` reports CIMD as unsupported before it opens a transport.
+
 ### Tool naming and coexistence
 
 The model sees each tool under a stable server-qualified name: `mcp__<serverName>__<rawName>`, for example `mcp__github__create_issue` — the same naming shape Claude Code and Codex use. Names stay stable while the server keeps the same tool name, so session history and permission rules survive restarts and reloads. Two servers can both offer a tool named `search` and coexist as `mcp__github__search` and `mcp__web__search`.

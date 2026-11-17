@@ -60,6 +60,9 @@ function resolveProbeOptions(options: McpProbeOptions) {
  */
 export async function probeServer(ctx: Context, config: Config, options: McpProbeOptions = {}): Promise<McpProbeResult> {
   const spec = resolveProbeOptions(options)
+  if (config.transport === 'streamable-http' && config.authentication?.mode === 'cimd-client-credentials') {
+    return { ok: false, stage: 'connect', message: 'Probe does not support CIMD machine authentication', durationMs: 0, closeConfirmed: true }
+  }
   const startedAt = Date.now()
   const remaining = (): number => spec.timeoutMs - (Date.now() - startedAt)
   const binding = new McpTemplateBinding(ctx, config)

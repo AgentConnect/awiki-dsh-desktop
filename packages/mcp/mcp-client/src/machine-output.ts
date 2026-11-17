@@ -4,14 +4,14 @@ import type { MachineSentBearer } from './machine-history.ts'
 
 /** Private callbacks used only by one connection's SDK bridge. */
 export interface MachineOutputProtection {
-  /** Revalidate expired discovery before a new SDK tool operation, never while projecting its result. */
-  prepare?(): Promise<void>
-  /** Pin credentials until the SDK operation finishes projecting its output. */
-  begin(): () => void
+  /**
+   * Pin the signing binding and redaction history for an SDK operation and its output.
+   * @param operation - Work receiving the authorization check for its publication point.
+   * @returns The result of the operation.
+   */
+  run<T>(operation: (assertActive: () => Promise<void>) => Promise<T>): Promise<T>
   /** Replace exact known bearer values in strings and JSON property names. */
   sanitize<T>(value: T): T
-  /** Recheck current connection, durable generation and signer lease. */
-  assertActive(): Promise<void>
 }
 
 /** Bounded secret retention; no method exposes the retained bearer collection. */

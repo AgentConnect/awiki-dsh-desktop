@@ -196,6 +196,17 @@ describe('probeServer', () => {
     expect(mockClose).toHaveBeenCalled()
   })
 
+  it('refuses CIMD before starting the SDK', async () => {
+    const config = { ...httpConfig(), transport: 'streamable-http' as const, authentication: {
+      mode: 'cimd-client-credentials' as const, connectionId: 'probe', provider: 'example', credentialRef: 'MCP_CREDENTIAL',
+      stateRoot: '/state', encryptionKeyRef: 'MCP_STORAGE_KEY', requestedScopes: ['catalog.read'],
+    } }
+    expect(await probeServer(new Context(), config)).toMatchObject({ ok: false, stage: 'connect',
+      message: containing('does not support CIMD'), closeConfirmed: true })
+    expect(mockConnect).not.toHaveBeenCalled()
+    expect(mockClose).not.toHaveBeenCalled()
+  })
+
   it('rejects a non-positive budget before doing anything', async () => {
     await expect(probeServer(new Context(), httpConfig(), { timeoutMs: 0 })).rejects.toThrow(TypeError)
     expect(mockConnect).not.toHaveBeenCalled()

@@ -14,7 +14,8 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import McpResources from '@deepseek-ai/dsh-mcp-resources'
+import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import Tools from '@deepseek-ai/dsh-tools'
@@ -23,7 +24,7 @@ import * as McpClient from '../src/index.ts'
 import { discoverMachineTarget } from '../src/machine-discovery.ts'
 import { createTestMachineFetch, type machineFetch } from '../src/machine-http.ts'
 import { MachineConnectionStore, type MachineToken } from '../src/machine-store.ts'
-import { McpSigningProviderRegistry, signingProvider } from '../src/signing-provider.ts'
+import { credentialSigner, McpSigningProviderRegistry, signingProvider } from '../src/signing-provider.ts'
 
 const wire = vi.hoisted(() => ({ send: undefined as typeof machineFetch | undefined }))
 vi.mock('../src/machine-http.ts', async (importOriginal) => {
@@ -44,7 +45,7 @@ function json(response: ServerResponse, value: object): void {
   response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(value))
 }
 
-it('loads a machine connection without ANP, verifies challenge and OIDC, renews expiry and rebinds a rotated key', async () => {
+it.each(['modern', 'legacy'])('loads a %s machine connection through challenge and OIDC and retains operation limits', async (era) => {
   const root = await mkdtemp(join(tmpdir(), 'mcp-cimd-'))
   const context = new Context()
   const key = () => generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
@@ -55,6 +56,14 @@ it('loads a machine connection without ANP, verifies challenge and OIDC, renews 
   let wellKnown = 0
   let oidc = 0
   let jwks = 0
+  let tokenAttempts = 0
+  let throttle: Headers | undefined
+  let nextToolResponse: ((response: ServerResponse, id: number) => void) | undefined
+  let nextListing: ((reply: () => void) => void) | undefined
+  let nextRead: ((reply: () => void) => void) | undefined
+  let instructions = 'fixture server instructions'
+  let toolCalls = 0
+  const cancellationNotice = Promise.withResolvers<unknown>()
   const failures: unknown[] = []
   const receivedAssertions = new Set<string>()
   const handle = async (request: IncomingMessage, response: ServerResponse) => {
@@ -74,6 +83,8 @@ it('loads a machine connection without ANP, verifies challenge and OIDC, renews 
         jwks++
         return json(response, { keys: [{ ...clientKey.publicKey.export({ format: 'jwk' }), kid: 'current-key' }] })
       case '/token': {
+        tokenAttempts++
+        if (throttle) return void response.writeHead(429, Object.fromEntries(throttle)).end()
         const form = new URLSearchParams(await body(request))
         expect(form.get('grant_type')).toBe('client_credentials')
         expect(form.get('client_id')).toBe(client)
@@ -99,13 +110,46 @@ it('loads a machine connection without ANP, verifies challenge and OIDC, renews 
           return void response.writeHead(401, { 'www-authenticate': `Bearer resource_metadata="${origin}/resource-metadata"` }).end()
         }
         if (request.method === 'GET') return void response.writeHead(405).end()
-        const rpc = JSON.parse(await body(request)) as { method: string; id: number }
+        const rpc = JSON.parse(await body(request)) as { method: string; id: number; params?: { requestId?: number } }
         const result = (value: object) => json(response, { jsonrpc: '2.0', id: rpc.id,
           result: { resultType: 'complete', ttlMs: 0, cacheScope: 'private', ...value } })
         switch (rpc.method) {
-          case 'server/discover': return result({ supportedVersions: ['2026-07-28'], capabilities: { tools: {} } })
-          case 'tools/list': return result({ tools: [{ name: 'catalog', description: 'Read one catalog entry', inputSchema: { type: 'object' } }] })
-          case 'tools/call': return result({ content: [{ type: 'text', text: `catalog entry ${request.headers.authorization}` }] })
+          case 'server/discover': return era === 'modern'
+            ? result({ supportedVersions: ['2026-07-28'], capabilities: { tools: {}, resources: {} }, instructions })
+            : json(response, { jsonrpc: '2.0', id: rpc.id, error: { code: -32601, message: 'Method not found' } })
+          case 'initialize': return result({ protocolVersion: '2025-11-25', capabilities: { tools: {}, resources: {} }, instructions,
+            serverInfo: { name: 'fixture', version: '1' } })
+          case 'notifications/initialized': return void response.writeHead(202).end()
+          case 'notifications/cancelled': {
+            cancellationNotice.resolve(rpc.params?.requestId)
+            return void response.writeHead(202).end()
+          }
+          case 'tools/list': {
+            const reply = () => result({ tools: [{ name: 'catalog', description: 'Read one catalog entry', inputSchema: { type: 'object' } }] })
+            const listing = nextListing
+            nextListing = undefined
+            if (listing) listing(reply)
+            else reply()
+            return
+          }
+          case 'tools/call': {
+            toolCalls++
+            const reply = nextToolResponse
+            nextToolResponse = undefined
+            if (reply) return reply(response, rpc.id)
+            return result({ content: [{ type: 'text', text: `catalog entry ${request.headers.authorization}` }] })
+          }
+          case 'resources/read': {
+            const reply = () => response.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: {
+              resultType: 'complete', ttlMs: 0, cacheScope: 'private', contents: [{ uri: 'test://resource', text: 'stale resource result' }],
+            } }))
+            const read = nextRead
+            nextRead = undefined
+            response.writeHead(200, { 'content-type': 'application/json', 'x-fixture-held': 'yes' })
+            if (read) { response.flushHeaders(); read(reply) }
+            else reply()
+            return
+          }
           default: throw new Error(`Unexpected test RPC method ${rpc.method}`)
         }
       }
@@ -125,18 +169,26 @@ it('loads a machine connection without ANP, verifies challenge and OIDC, renews 
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('No fixture address')
     origin = `https://localhost:${address.port}`
-    wire.send = createTestMachineFetch({ origin, ca: cert })
-    const file = join(root, 'cordis.yml')
+    const pinned = createTestMachineFetch({ origin, ca: cert })
+    let heldHeaders = Promise.withResolvers<undefined>()
+    wire.send = async (...args) => {
+      const response = await pinned(...args)
+      if (response.headers.has('x-fixture-held')) heldHeaders.resolve(undefined)
+      return response
+    }
+    const credential = { clientId: `${origin}/client.json`, keyId: 'current-key', issuer: `${origin}/issuer`, resource: `${origin}/mcp` }
+    const registry = new McpSigningProviderRegistry(context)
+    let releaseSigner = era === 'legacy' ? registry.register('fixture', credentialSigner(credential)) : undefined
     const config = {
       transport: 'streamable-http', serverName: 'cimd', url: `${origin}/mcp`, failOnStartupError: true,
-      reconnect: { enabled: false }, authentication: { mode: 'cimd-client-credentials', provider: 'credentials', connectionId: 'cimd-test',
-        credentialRef: 'CIMD_SIGNING_KEY', credential: { clientId: `${origin}/client.json`, keyId: 'current-key', issuer: `${origin}/issuer`, resource: `${origin}/mcp` },
+      reconnect: { enabled: false }, authentication: { mode: 'cimd-client-credentials', connectionId: 'cimd-test', credentialRef: 'CIMD_SIGNING_KEY',
+        ...(era === 'legacy' ? { provider: 'fixture' } : { provider: 'credentials', credential }),
         stateRoot: join(root, 'state'), encryptionKeyRef: 'CIMD_STORAGE_KEY', requestedScopes: ['catalog.read'] },
     }
-    await writeFile(file, `- name: '@deepseek-ai/dsh-mcp-client'\n  config: ${JSON.stringify(config)}\n`)
     await context.plugin(SystemPrompt)
     await context.plugin(Tools)
     await context.plugin(NativeToolExecutor)
+    await context.plugin(McpResources)
     await context.plugin(LocalCredentials, { dshHome: root, watch: false })
     const credentials = context.get('credentials')!
     const putKey = () => credentials.set(credentialRef('CIMD_SIGNING_KEY'), clientKey.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString())
@@ -148,13 +200,20 @@ it('loads a machine connection without ANP, verifies challenge and OIDC, renews 
     context.loader.internal = { version: 'v2', import: async () => McpClient, loadCache: new Map(),
       register: unexpectedModuleOperation, getOrCreateModuleJob: unexpectedModuleOperation,
       resolveSync: unexpectedModuleOperation, load: unexpectedModuleOperation }
-    await context.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(file).href } })
+    let includes = 0
+    const include = async () => {
+      const file = join(root, `cordis-${++includes}.yml`)
+      await writeFile(file, `- name: '@deepseek-ai/dsh-mcp-client'\n  config: ${JSON.stringify(config)}\n`)
+      return context.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(file).href } })
+    }
+    await include()
     await context.loader.await()
     expect(failures).toEqual([])
     expect({ challenges, wellKnown, oidc, jwks, issued }).toEqual({ challenges: 1, wellKnown: 0, oidc: 1, jwks: 1, issued: 1 })
+    const callRaw = (signal = new AbortController().signal) => executeToolFixture(context, { name: 'mcp__cimd__catalog', arguments: {},
+      callId: ToolCallId('cimd-fixture-call'), signal })
     const call = async () => {
-      const output = await executeToolFixture(context, { name: 'mcp__cimd__catalog', arguments: {},
-        callId: ToolCallId('cimd-fixture-call'), signal: new AbortController().signal })
+      const output = await callRaw()
       expect(output.isError).toBe(false)
       expect(JSON.stringify(output)).toContain('catalog entry')
       expect(JSON.stringify(output)).not.toContain('private-token-')
@@ -167,8 +226,128 @@ it('loads a machine connection without ANP, verifies challenge and OIDC, renews 
     await putKey()
     await call()
     expect({ challenges, oidc, jwks, issued }).toEqual({ challenges: 1, oidc: 1, jwks: 3, issued: 3 })
+
+    const held = Promise.withResolvers<() => void>()
+    nextToolResponse = (response, id) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream', 'x-fixture-held': 'yes' }).flushHeaders()
+      held.resolve(() => response.end(`data: ${JSON.stringify({ jsonrpc: '2.0', id,
+        result: { resultType: 'complete', content: [{ type: 'text', text: 'stale fixture result' }] } })}\n\n`))
+    }
+    const oldRequest = callRaw()
+    await heldHeaders.promise
+    try {
+      if (releaseSigner) {
+        await releaseSigner()
+        releaseSigner = registry.register('fixture', credentialSigner(credential))
+      } else {
+        clientKey = key()
+        await putKey()
+      }
+      await call()
+    } finally { (await held.promise)() }
+    const stale = await oldRequest
+    expect(stale.isError).toBe(true)
+    expect(JSON.stringify(stale)).not.toContain('stale fixture result')
+
+    heldHeaders = Promise.withResolvers<undefined>()
+    const resource = Promise.withResolvers<() => void>()
+    nextRead = resource.resolve
+    const oldResource = executeToolFixture(context, { name: 'read_mcp_resource', arguments: { server: 'cimd', uri: 'test://resource' },
+      callId: ToolCallId('cimd-resource'), signal: new AbortController().signal })
+    await heldHeaders.promise
+    try {
+      clientKey = key()
+      await putKey()
+      await call()
+    } finally { (await resource.promise)() }
+    const staleResource = await oldResource
+    expect(staleResource.isError).toBe(true)
+    expect(JSON.stringify(staleResource)).not.toContain('stale resource result')
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    for (const format of ['json', 'sse']) {
+      const arrived = Promise.withResolvers<() => void>()
+      nextToolResponse = (response, id) => {
+        const result = { jsonrpc: '2.0', id, result: { resultType: 'complete', content: [{ type: 'text', text: 'slow fixture result' }] } }
+        if (format === 'sse') {
+          response.writeHead(200, { 'content-type': 'text/event-stream' })
+          response.write('data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":1,"progress":1}}\n\n')
+        }
+        arrived.resolve(() => {
+          if (format === 'sse') response.end(`data: ${JSON.stringify(result)}\n\n`)
+          else json(response, result)
+        })
+      }
+      const before = toolCalls
+      const pending = callRaw()
+      const finish = await arrived.promise
+      await vi.advanceTimersByTimeAsync(40_000)
+      finish()
+      const result = await pending
+      expect(result.isError).toBe(false)
+      expect(JSON.stringify(result)).toContain('slow fixture result')
+      expect(toolCalls).toBe(before + 1)
+    }
+    for (const [header, wait] of [['2', 2000], [new Date(Date.now() + 8000).toUTCString(), 6000], [null, 1000], ['invalid', 1000]] as const) {
+      clientKey = key()
+      await putKey()
+      throttle = new Headers(header === null ? {} : { 'retry-after': header })
+      const before = tokenAttempts
+      expect((await callRaw()).isError).toBe(true)
+      expect(tokenAttempts).toBe(before + 1)
+      throttle = undefined
+      expect((await callRaw()).isError).toBe(true)
+      expect(tokenAttempts).toBe(before + 1)
+      await vi.advanceTimersByTimeAsync(wait)
+      await call()
+      expect(tokenAttempts).toBe(before + 2)
+    }
+
+    const arrived = Promise.withResolvers<undefined>()
+    const closed = Promise.withResolvers<undefined>()
+    let cancelledId: number | undefined
+    nextToolResponse = (response, id) => {
+      cancelledId = id
+      response.once('close', () => closed.resolve(undefined))
+      response.writeHead(200, { 'content-type': 'text/event-stream' }).flushHeaders()
+      arrived.resolve(undefined)
+    }
+    const cancellation = new AbortController()
+    const cancelled = callRaw(cancellation.signal)
+    await arrived.promise
+    cancellation.abort()
+    expect((await cancelled).isError).toBe(true)
+    if (era === 'legacy') {
+      expect(await cancellationNotice.promise).toBe(cancelledId)
+      expect(await Promise.race([closed.promise.then(() => true), setTimeout(200, false)])).toBe(true)
+    }
+    await closed.promise
+
+    const installed = () => [...context.loader.entries()].filter(entry => entry.options.name === '@deepseek-ai/dsh-mcp-client').at(-1)?.fiber
+    await installed()!.dispose()
+    instructions = 'stale startup instructions'
+    const listing = Promise.withResolvers<() => void>()
+    nextListing = listing.resolve
+    const mounting = include()
+    const finishListing = await listing.promise
+    clientKey = key()
+    await putKey()
+    finishListing()
+    await mounting
+    await context.loader.await()
+    expect(context.tools.schemas().some(tool => tool.name === 'mcp__cimd__catalog')).toBe(false)
+    expect(renderPrompt(await context.systemPrompt.assemble())).not.toContain('stale startup instructions')
+    await installed()!.dispose()
+    instructions = 'current startup instructions'
+    await include()
+    await context.loader.await()
+    await installed()!.await()
+    const prompt = renderPrompt(await context.systemPrompt.assemble())
+    expect(prompt).toContain('current startup instructions')
+    expect(prompt).not.toContain('stale startup instructions')
     expect(failures).toEqual([])
   } finally {
+    vi.useRealTimers()
     await context.fiber.dispose()
     server.closeAllConnections()
     await new Promise<void>(resolve => server.close(() => resolve()))

@@ -6,6 +6,7 @@ import { McpLocalError } from './diagnostic.ts'
 import { createTransport } from './transport.ts'
 import type { Config } from './index.ts'
 import type { McpCloseResult } from './types.ts'
+import type { MachineAuthenticationSession } from './machine-auth.ts'
 
 /** Tracks actual tasks separately from their interruptible callers. */
 export class McpGeneration {
@@ -28,12 +29,13 @@ export class McpGeneration {
    * Connect within the caller's remaining startup or probe budget.
    * @param config - resolved transport configuration.
    * @param timeoutMs - remaining operation budget; undefined leaves the SDK default.
-   * @param authorizedFetch - Optional Host authorization hook for Streamable HTTP.
+   * @param machine - Optional CIMD authorization and stream ownership.
    * @returns completion of negotiation, or cancellation/deadline rejection.
    */
-  connect(config: Config, timeoutMs: number | undefined, authorizedFetch?: typeof fetch): Promise<void> {
+  connect(config: Config, timeoutMs: number | undefined, machine?: MachineAuthenticationSession): Promise<void> {
     this.lifetime.signal.throwIfAborted()
-    const transport = this.transport = createTransport(config, authorizedFetch)
+    const transport = this.transport = createTransport(config, machine?.fetch)
+    machine?.bindTransport(transport)
     const close = transport.close.bind(transport)
     let closing: Promise<void> | undefined
     transport.close = () => closing ??= close()

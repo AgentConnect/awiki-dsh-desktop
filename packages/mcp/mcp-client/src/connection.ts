@@ -186,7 +186,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
     return closureFailure === undefined
   }
 
-  function enqueueSync(record: Generation): Promise<void> {
+  function enqueueSync(record: Generation, startupBinding?: () => Promise<void>): Promise<void> {
     const run = syncChain.then(async () => {
       if (!isCurrent(record)) return
       await record.wire.run(async (signal) => {
@@ -197,6 +197,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
           signal,
           ...(redact ? { redact } : {}),
           ...(machine ? { protection: machine.protection } : {}),
+          ...(startupBinding ? { startupBinding } : {}),
         }, disposers, () => isCurrent(record))
       })
     })
@@ -320,27 +321,32 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         : config.startupTimeoutMs - (Date.now() - startedAt)
       const resolved = await record.wire.run(signal => binding.resolve(signal), remaining())
       bindingValue = { config: resolved }
-      await record.wire.connect(resolved, remaining(), machine?.fetch)
-      if (!isCurrent(record)) return
-      const instructionsText = client.getInstructions()?.trimEnd() ?? ''
-      await machine?.protection.assertActive()
-      const text = machine ? machine.protection.sanitize(instructionsText) : instructionsText
-      const instructions = text ? `### MCP server: ${config.serverName}\n\n${text}` : ''
-      const maxInstructionBytes = config.maxInstructionBytes ?? DEFAULT_MAX_INSTRUCTION_BYTES
-      if (Buffer.byteLength(instructions) > maxInstructionBytes) throw new McpLocalError(`${label}: server instructions exceed maxInstructionBytes (${maxInstructionBytes})`, 'MCP_INSTRUCTIONS_TOO_LARGE')
-      const sync = enqueueSync(record)
-      const budget = remaining()
-      await (budget === undefined ? sync : withDeadline(sync, budget, `${label}: startup timed out`))
-      if (!isCurrent(record)) return
-      record.wire.assertOpen()
-      serverInstructions = instructions
-      record.connectedAt = Date.now()
-      status.update({ state: 'connected', toolCount: disposers.size, connectedAt: record.connectedAt })
-      readiness.resolve({})
-      if (failedAttempts > 0) ctx.logger.info(`${label}: reconnected and re-synced tools (attempt ${failedAttempts}/${policy.maxAttempts})`)
+      const start = async (assertActive?: () => Promise<void>) => {
+        await record.wire.connect(resolved, remaining(), machine)
+        if (!isCurrent(record)) return
+        const instructionsText = client.getInstructions()?.trimEnd() ?? ''
+        const text = machine ? machine.protection.sanitize(instructionsText) : instructionsText
+        const instructions = text ? `### MCP server: ${config.serverName}\n\n${text}` : ''
+        const maxInstructionBytes = config.maxInstructionBytes ?? DEFAULT_MAX_INSTRUCTION_BYTES
+        if (Buffer.byteLength(instructions) > maxInstructionBytes) throw new McpLocalError(`${label}: server instructions exceed maxInstructionBytes (${maxInstructionBytes})`, 'MCP_INSTRUCTIONS_TOO_LARGE')
+        const sync = enqueueSync(record, assertActive)
+        const budget = remaining()
+        await (budget === undefined ? sync : withDeadline(sync, budget, `${label}: startup timed out`))
+        await assertActive?.()
+        if (!isCurrent(record)) return
+        record.wire.assertOpen()
+        serverInstructions = instructions
+        record.connectedAt = Date.now()
+        status.update({ state: 'connected', toolCount: disposers.size, connectedAt: record.connectedAt })
+        readiness.resolve({})
+        if (failedAttempts > 0) ctx.logger.info(`${label}: reconnected and re-synced tools (attempt ${failedAttempts}/${policy.maxAttempts})`)
+      }
+      if (machine) await machine.protection.run(start)
+      else await start()
     } catch (error) {
       if (current !== record) return
       current = undefined
+      if (machine) clearTools()
       const confirmed = await close(record)
       readiness.resolve({ error: machine ? mcpRequestError(error, 'startup', redact)
         : config.expandTemplates ? new Error(diagnostic(error, 'startup')) : error })
@@ -365,8 +371,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         const record = current
         if (record?.connectedAt === undefined) throw new McpToolError(`${label}: server is disconnected`, 'MCP_SERVER_UNAVAILABLE')
         try {
-          await machine?.protection.prepare?.()
-          const value = await record.wire.run(async (signal) => {
+          const read = () => record.wire.run(async (signal) => {
             const options = { signal: AbortSignal.any([signal, exec.signal]), timeout: config.toolCallTimeoutMs }
             const generation = record.wire.client
             // The SDK answers an unadvertised capability with the same empty page, but
@@ -390,8 +395,14 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
               default: return assertNever(request)
             }
           })
-          await machine?.protection.assertActive()
-          return machine ? machine.protection.sanitize(value) : value
+          if (!machine) return await read()
+          return await machine.protection.run(async (check) => {
+            const value = await read().catch(async (error) => { await check(); throw error })
+            await check()
+            record.wire.assertOpen()
+            exec.signal.throwIfAborted()
+            return machine.protection.sanitize(value)
+          })
         } catch (error) {
           exec.signal.throwIfAborted()
           throw mcpRequestError(error, request.method, redact)
