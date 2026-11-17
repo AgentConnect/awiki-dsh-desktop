@@ -56,8 +56,8 @@ import { probeServer } from '@deepseek-ai/dsh-mcp-client/src/probe.ts'
 const anyNumber = expect.any(Number) as number
 const containing = (text: string): string => expect.stringContaining(text) as string
 
-function httpConfig(): Config {
-  return Config({
+function httpConfig(): Extract<Config, { transport: 'streamable-http' }> {
+  const config = Config({
     transport: 'streamable-http',
     serverName: 'probe',
     url: 'http://localhost:9',
@@ -66,6 +66,8 @@ function httpConfig(): Config {
     startupTimeoutMs: 30_000,
     failOnStartupError: false,
   })
+  if (config.transport !== 'streamable-http') throw new Error('Expected an HTTP test config')
+  return config
 }
 
 function page(names: string[], nextCursor?: string): unknown {
