@@ -210,3 +210,11 @@ it('names a signer once per Host and retires its generation when its effect is r
     await replacement()
   } finally { await context.fiber.dispose() }
 })
+
+it('validates an external signer configuration without built-in credential fields', () => {
+  const config = McpClient.Config({ transport: 'streamable-http', url: 'https://resource.example/mcp', serverName: 'alternate',
+    authentication: { mode: 'cimd-client-credentials', connectionId: 'alternate', provider: 'alternate', credentialRef: 'registered',
+      requestedScopes: ['catalog.read'], stateRoot: '/tmp/fixture', encryptionKeyRef: 'MCP_STATE_KEY' } })
+  expect(config).toMatchObject({ authentication: { provider: 'alternate', credentialRef: 'registered' } })
+  expect(config.transport === 'streamable-http' && config.authentication).not.toHaveProperty('credential')
+})

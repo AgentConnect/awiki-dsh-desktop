@@ -28,7 +28,7 @@ import type { McpConnectionStatusHandle } from './status.ts'
 import { McpLocalError } from './diagnostic.ts'
 import { machineManagedHeaders } from './machine-auth.ts'
 import { machineUrl } from './machine-http.ts'
-import type { MachineAuthentication } from './machine-types.ts'
+import type { CredentialSigningConfig, MachineAuthentication } from './machine-types.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
 
@@ -199,8 +199,8 @@ export const Config = z.union([
         connectionId: z.string().required().pattern(/^[A-Za-z0-9_-]{1,128}$/u),
         provider: z.string().required().pattern(/^[a-z][a-z0-9-]{0,63}$/u),
         credentialRef: z.string().required(), issuer: z.string(),
-        credential: z.object({ clientId: z.string().required(), keyId: z.string().required(),
-          issuer: z.string().required(), resource: z.string().required() }),
+        credential: (z.object({ clientId: z.string().required(), keyId: z.string().required(),
+          issuer: z.string().required(), resource: z.string().required() }) as z<CredentialSigningConfig | undefined>).default(undefined),
         requestedScopes: z.array(z.string().pattern(/^[\x21\x23-\x5b\x5d-\x7e]{1,128}$/u)).min(1).max(64).required(),
         stateRoot: z.string().required(), encryptionKeyRef: z.string().required(),
       }),
