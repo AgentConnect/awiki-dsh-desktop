@@ -397,7 +397,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
           })
           if (!machine) return await read()
           return await machine.protection.run(async (check) => {
-            const value = await read().catch(async (error) => { await check(); throw error })
+            const value = await read().catch(async (error: unknown) => { await check(); throw error })
             await check()
             record.wire.assertOpen()
             exec.signal.throwIfAborted()

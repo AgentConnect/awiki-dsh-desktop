@@ -19,6 +19,9 @@ async function fixture(id = 'history') {
   return { root, store, generation, file, token }
 }
 
+interface CipherBox { iv: string; tag: string; ciphertext: string }
+interface StoredRow extends Partial<CipherBox> { schema: number; history?: CipherBox }
+
 async function writeHistory(file: string, payload: unknown): Promise<void> {
   const row = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
   const iv = randomBytes(12)
@@ -37,14 +40,14 @@ it('does not reuse a Token ciphertext as history or copy history to another conn
   const token = f.token('private-purpose-bearer', 'purpose')
   await f.store.commit(f.generation, token)
   await f.store.rememberSent(f.generation, 'partition', token, async () => {})
-  const original = JSON.parse(await readFile(f.file, 'utf8'))
+  const original = JSON.parse(await readFile(f.file, 'utf8')) as StoredRow
   const substituted = { ...original, history: { iv: original.iv, tag: original.tag, ciphertext: original.ciphertext } }
   await writeFile(f.file, JSON.stringify(substituted), { mode: 0o600 })
   await expect(f.store.sentHistory()).rejects.toThrow('credential_store_unavailable')
   await writeFile(f.file, JSON.stringify(original), { mode: 0o600 })
   const other = new MachineConnectionStore(f.root, 'other', async () => Buffer.alloc(32, 73)); await other.open('partition')
   const file = (await readdir(f.root)).filter(name => name.endsWith('.json')).find(name => join(f.root, name) !== f.file)!
-  const otherRow = JSON.parse(await readFile(join(f.root, file), 'utf8'))
+  const otherRow = JSON.parse(await readFile(join(f.root, file), 'utf8')) as StoredRow
   await writeFile(join(f.root, file), JSON.stringify({ ...otherRow, history: original.history }), { mode: 0o600 })
   await expect(other.sentHistory()).rejects.toThrow('credential_store_unavailable')
 })
@@ -82,7 +85,8 @@ it('does not restart an unchanged receipt lifetime on every history reload', () 
 
 it('refuses an unsupported future state format without replacing it', async () => {
   const f = await fixture()
-  const row = JSON.parse(await readFile(f.file, 'utf8')); row.schema = 3
+  const row = JSON.parse(await readFile(f.file, 'utf8')) as StoredRow
+  row.schema = 3
   const raw = JSON.stringify(row); await writeFile(f.file, raw, { mode: 0o600 })
   await expect(f.store.state()).rejects.toThrow('credential_store_unavailable')
   expect((await readFile(f.file, 'utf8')) === raw).toBe(true)
@@ -216,7 +220,7 @@ it('invalidates a legacy Token without losing an active operation marker', async
 
 it('authenticates fresh empty completeness and rejects missing or truncated envelopes', async () => {
   const f = await fixture()
-  const original = JSON.parse(await readFile(f.file, 'utf8'))
+  const original = JSON.parse(await readFile(f.file, 'utf8')) as StoredRow
   expect(Boolean(original.history?.ciphertext)).toBe(true)
   for (const altered of [
     { ...original, history: undefined },

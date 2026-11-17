@@ -10,7 +10,7 @@ import { MACHINE_TOKEN_MAX_LIFETIME } from './machine-history.ts'
 import { machineFetch, machineJson, machineUrl } from './machine-http.ts'
 import { MachineBearerRedactor, type MachineOutputProtection } from './machine-output.ts'
 import { MachineConnectionStore, type MachineToken } from './machine-store.ts'
-import type { MachineAuthentication, McpSigningLease, McpSigningTarget } from './machine-types.ts'
+import type { MachineAuthentication, McpSigningIdentity, McpSigningLease, McpSigningTarget } from './machine-types.ts'
 import { credentialSigner, signingProvider } from './signing-provider.ts'
 
 /** HTTP headers whose authority comes from the machine transport rather than profile headers. */
@@ -79,7 +79,8 @@ export class MachineAuthenticationSession {
       throw new McpLocalError('The configured MCP signer refused the target or credential', 'MCP_MACHINE_SIGNER_UNAVAILABLE')
     }
     try {
-      const { clientId, keyId, algorithm, keyVersion, policyVersion } = lease.identity
+      const identity: Omit<McpSigningIdentity, 'algorithm'> & { algorithm: unknown } = lease.identity
+      const { clientId, keyId, algorithm, keyVersion, policyVersion } = identity
       if (machineUrl(clientId).pathname === '/' || !keyId || algorithm !== 'ES256' || !keyVersion || !policyVersion) {
         throw new McpLocalError('The signer did not provide a valid published ES256 client identity', 'MCP_MACHINE_SIGNER_UNAVAILABLE')
       }

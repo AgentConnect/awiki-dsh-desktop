@@ -63,7 +63,7 @@ async function withSession(reply: () => Response | Promise<Response>,
   } }
   let release = options.provider === null ? undefined : registry.register('fixture', options.provider ?? provider)
   const register = async (next: McpSigningProvider) => {
-    await release?.()
+    release?.()
     release = registry.register('fixture', next)
   }
   const credentials = { resolve: async () => ({
@@ -221,7 +221,7 @@ it('holds concurrent sends behind a single Token exchange', async () => {
   const started = Promise.withResolvers<undefined>()
   const provide = Promise.withResolvers<Response>()
   const concurrent = Promise.withResolvers<undefined>()
-  const retryAt = MachineConnectionStore.prototype.retryAt
+  const { value: retryAt } = Object.getOwnPropertyDescriptor(MachineConnectionStore.prototype, 'retryAt') as { value: MachineConnectionStore['retryAt'] }
   let readers = 0
   const observed = vi.spyOn(MachineConnectionStore.prototype, 'retryAt').mockImplementation(async function (this: MachineConnectionStore, ...args) {
     const deadline = await retryAt.apply(this, args)

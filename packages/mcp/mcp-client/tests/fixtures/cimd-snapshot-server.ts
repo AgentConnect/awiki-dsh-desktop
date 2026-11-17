@@ -69,7 +69,7 @@ export async function startCimdSnapshotServer() {
     tlsKey.fill(0)
     closeServer = () => {
       server.closeAllConnections()
-      return new Promise<void>(resolve => server.close(() => resolve()))
+      return new Promise<void>(resolve => server.close(() => { resolve() }))
     }
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject)

@@ -64,17 +64,17 @@ export async function machineFetch(input: string | URL | Request, init: RequestI
 export function createTestMachineFetch(options: { origin: string; ca: string }): typeof machineFetch {
   const url = machineUrl(options.origin)
   if (process.env.NODE_ENV !== 'test' || url.origin !== options.origin || !['localhost', '127.0.0.1'].includes(url.hostname) || !options.ca) throw new Error('test_transport_forbidden')
-  return (input, init = {}, beforeSend, deadline = 'oauth') => requestMachine(input, init, options, beforeSend, deadline)
+  return (input, init, beforeSend, deadline) => requestMachine(input, init, options, beforeSend, deadline)
 }
 
-async function requestMachine(input: string | URL | Request, init: RequestInit, test?: { origin: string; ca: string },
+async function requestMachine(input: string | URL | Request, init: RequestInit | undefined, test?: { origin: string; ca: string },
   beforeSend?: () => Promise<void>, deadline: 'oauth' | 'mcp' = 'oauth'): Promise<Response> {
   if (!(input instanceof Request)) machineUrl(String(input))
   const outgoing = new Request(input, { ...init, redirect: 'manual', credentials: 'omit' })
   const budget = new AbortController()
-  const timer = setTimeout(() => budget.abort(), 30_000)
+  const timer = setTimeout(() => { budget.abort() }, 30_000)
   timer.unref()
-  const stopTimer = () => clearTimeout(timer)
+  const stopTimer = () => { clearTimeout(timer) }
   try {
     if (outgoing.headers.has('host')) throw new Error('managed_authentication_header')
     const url = machineUrl(outgoing.url)
@@ -82,7 +82,7 @@ async function requestMachine(input: string | URL | Request, init: RequestInit, 
     if (test && url.origin !== test.origin) throw new Error('unsafe_target')
     const signal = AbortSignal.any([outgoing.signal, budget.signal])
     if (signal.aborted) throw new Error('network_failure')
-    const addresses = await withAbort(lookup(url.hostname.replace(/^\[|\]$/gu, ''), { all: true, verbatim: true }), signal)
+    const addresses = await withAbort(lookup(url.hostname.replace(/^\[|\]$/gu, ''), { all: true, order: 'verbatim' }), signal)
     if (addresses.length > 32 || addresses.some(value => !publicAddress(value.address) && !(test && url.origin === test.origin && (value.address === '::1' || /^127(?:\.[0-9]{1,3}){3}$/u.test(value.address))))) throw new Error('unsafe_target')
     const selected = (test ? addresses.find(value => value.address === '127.0.0.1') : undefined) ?? addresses[0]
     if (!selected) throw new Error('unsafe_target')
@@ -110,7 +110,7 @@ async function requestMachine(input: string | URL | Request, init: RequestInit, 
       })
       if (deadline === 'mcp') req.once('socket', socket => socket.once('secureConnect', stopTimer))
       req.once('close', stopTimer)
-      req.on('error', () => reject(new Error('network_failure')))
+      req.on('error', () => { reject(new Error('network_failure')) })
       req.end(body)
     })
   } catch (error) {
@@ -214,7 +214,7 @@ async function withAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise
   if (signal.aborted) throw new Error('network_failure')
   let stop!: () => void
   const aborted = new Promise<never>((_resolve, reject) => {
-    stop = () => reject(new Error('network_failure'))
+    stop = () => { reject(new Error('network_failure')) }
     signal.addEventListener('abort', stop, { once: true })
   })
   try { return await Promise.race([operation, aborted]) }

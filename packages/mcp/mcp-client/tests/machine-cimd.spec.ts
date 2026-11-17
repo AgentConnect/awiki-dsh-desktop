@@ -41,8 +41,8 @@ async function body(request: IncomingMessage): Promise<string> {
   return text
 }
 
-function json(response: ServerResponse, value: object): void {
-  response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(value))
+function json(response: ServerResponse, value: object): ServerResponse {
+  return response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(value))
 }
 
 it.each(['modern', 'legacy'])('loads a %s machine connection through challenge and OIDC and retains operation limits', async (era) => {
@@ -137,7 +137,7 @@ it.each(['modern', 'legacy'])('loads a %s machine connection through challenge a
             toolCalls++
             const reply = nextToolResponse
             nextToolResponse = undefined
-            if (reply) return reply(response, rpc.id)
+            if (reply) { reply(response, rpc.id); return }
             return result({ content: [{ type: 'text', text: `catalog entry ${request.headers.authorization}` }] })
           }
           case 'resources/read': {
@@ -166,7 +166,7 @@ it.each(['modern', 'legacy'])('loads a %s machine connection through challenge a
     '-addext', 'subjectAltName=DNS:localhost', '-days', '1', '-keyout', keyPath, '-out', certPath], { stdio: 'ignore' })
   const [cert, tlsKey] = await Promise.all([readFile(certPath, 'utf8'), readFile(keyPath)])
   const server = createServer({ cert, key: tlsKey }, (request, response) => {
-    void handle(request, response).catch((error) => { failures.push(error); response.writeHead(500).end() })
+    void handle(request, response).catch((error: unknown) => { failures.push(error); response.writeHead(500).end() })
   })
   try {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -242,7 +242,7 @@ it.each(['modern', 'legacy'])('loads a %s machine connection through challenge a
     await heldHeaders.promise
     try {
       if (releaseSigner) {
-        await releaseSigner()
+        releaseSigner()
         releaseSigner = registry.register('fixture', credentialSigner(credential))
       } else {
         clientKey = key()
@@ -324,7 +324,7 @@ it.each(['modern', 'legacy'])('loads a %s machine connection through challenge a
     let cancelledId: number | undefined
     nextToolResponse = (response, id) => {
       cancelledId = id
-      response.once('close', () => closed.resolve(undefined))
+      response.once('close', () => { closed.resolve(undefined) })
       response.writeHead(200, { 'content-type': 'text/event-stream' }).flushHeaders()
       arrived.resolve(undefined)
     }
@@ -368,7 +368,7 @@ it.each(['modern', 'legacy'])('loads a %s machine connection through challenge a
     vi.useRealTimers()
     await context.fiber.dispose()
     server.closeAllConnections()
-    await new Promise<void>(resolve => server.close(() => resolve()))
+    await new Promise<void>(resolve => server.close(() => { resolve() }))
     wire.send = undefined
     tlsKey.fill(0)
     await rm(root, { recursive: true, force: true })
@@ -401,11 +401,11 @@ it('names a signer once per Host and retires its generation when its effect is r
     const first = signingProvider(context, 'alternate')
     expect(first?.provider).toBe(implementation)
     expect(() => registry.register('alternate', implementation)).toThrow()
-    await release()
+    release()
     expect(signingProvider(context, 'alternate')).toBeUndefined()
     const replacement = registry.register('alternate', implementation)
     expect(signingProvider(context, 'alternate')?.generation).not.toBe(first?.generation)
-    await replacement()
+    replacement()
   } finally { await context.fiber.dispose() }
 })
 

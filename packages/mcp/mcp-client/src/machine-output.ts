@@ -39,7 +39,7 @@ export class MachineBearerRedactor {
   private maskClientAssertions(text: string): string {
     if (!this.clientIds.size) return text
     let attempts = 0
-    const decode = (part: string): Record<string, unknown> => JSON.parse(Buffer.from(part, 'base64url').toString('utf8'))
+    const decode = (part: string): unknown => JSON.parse(Buffer.from(part, 'base64url').toString('utf8')) as unknown
     const https = (value: unknown): value is string => {
       if (typeof value !== 'string') return false
       try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password && !url.hash } catch { return false }
@@ -54,9 +54,11 @@ export class MachineBearerRedactor {
         // The loop bounds guarantee three segments and their offsets.
         const payloadPart = parts[i + 1] as string; const signature = (parts[i + 2] as string).slice(0, 86)
         if (!payloadPart || payloadPart.length > 16384 || signature.length !== 86) continue
-        let claims: Record<string, unknown>
-        try { claims = decode(payloadPart) } catch { continue }
-        if (!claims || typeof claims !== 'object' || Object.keys(claims).some(key => !['iss', 'sub', 'aud', 'iat', 'exp', 'jti'].includes(key))
+        let payload: unknown
+        try { payload = decode(payloadPart) } catch { continue }
+        if (!payload || typeof payload !== 'object') continue
+        const claims = payload as Record<string, unknown>
+        if (Object.keys(claims).some(key => !['iss', 'sub', 'aud', 'iat', 'exp', 'jti'].includes(key))
           || !https(claims.iss) || !this.clientIds.has(claims.iss) || claims.sub !== claims.iss || !https(claims.aud)
           || !Number.isSafeInteger(claims.iat) || !Number.isSafeInteger(claims.exp)
           || (claims.exp as number) <= (claims.iat as number) || (claims.exp as number) - (claims.iat as number) > 60
@@ -67,8 +69,9 @@ export class MachineBearerRedactor {
           const headerText = headerPart.slice(start)
           if (headerText.length + payloadPart.length + 88 > 16384) continue
           let header: Record<string, unknown>
-          try { header = decode(headerText) } catch { continue }
-          if (!header || header.alg !== 'ES256' || (header.typ !== 'JWT' && header.typ !== 'client-authentication+jwt')
+          // The base64url prefix eyJ decodes to the start of a JSON object.
+          try { header = decode(headerText) as Record<string, unknown> } catch { continue }
+          if (header.alg !== 'ES256' || (header.typ !== 'JWT' && header.typ !== 'client-authentication+jwt')
             || Object.keys(header).some(key => !['alg', 'typ', 'kid'].includes(key))
             || typeof header.kid !== 'string' || !/^[\x21-\x7e]{1,1024}$/u.test(header.kid)) continue
           const bytes = Buffer.from(signature, 'base64url')
@@ -153,15 +156,15 @@ export class MachineBearerRedactor {
     }
     if (typeof value === 'string') return text(value) as T
     if (value === null || typeof value !== 'object') return value
-    const clone = (input: object): Record<string, unknown> | unknown[] => Array.isArray(input)
-      ? [] : Object.create(Object.getPrototypeOf(input) === null ? null : Object.prototype)
+    const clone = (input: object): object => Array.isArray(input)
+      ? [] : Object.create(Object.getPrototypeOf(input) === null ? null : Object.prototype) as object
     const result = clone(value)
     const seen = new WeakMap<object, object>([[value, result]])
-    const pending = [{ source: value, target: result }]
+    const pending: Array<{ source: object; target: object }> = [{ source: value, target: result }]
     for (let entry = pending.pop(); entry; entry = pending.pop()) {
       const { source, target } = entry
       const ordinary = new Set(Object.keys(source).filter(key => text(key) === key))
-      for (const [key, child] of Object.entries(source)) {
+      for (const [key, child] of Object.entries(source) as [string, unknown][]) {
         let safeKey = Array.isArray(source) ? key : text(key)
         if (safeKey !== key) {
           const base = safeKey; let suffix = 0
@@ -173,11 +176,13 @@ export class MachineBearerRedactor {
         let safeChild: unknown = child
         if (typeof child === 'string') safeChild = text(child)
         else if (child !== null && typeof child === 'object') {
-          safeChild = seen.get(child)
-          if (!safeChild) {
-            safeChild = clone(child); seen.set(child, safeChild as object)
-            pending.push({ source: child, target: safeChild as typeof result })
+          let targetChild = seen.get(child)
+          if (!targetChild) {
+            targetChild = clone(child)
+            seen.set(child, targetChild)
+            pending.push({ source: child, target: targetChild })
           }
+          safeChild = targetChild
         }
         Object.defineProperty(target, safeKey, { value: safeChild, enumerable: true, configurable: true, writable: true })
       }

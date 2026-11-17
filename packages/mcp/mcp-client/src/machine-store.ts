@@ -114,7 +114,7 @@ export class MachineConnectionStore {
       if (!row.ciphertext || !row.iv || !row.tag) throw new Error()
       const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(row.iv, 'base64url'))
       decipher.setAAD(Buffer.from(`${row.cipherGeneration ?? row.generation}:${row.partition}`)); decipher.setAuthTag(Buffer.from(row.tag, 'base64url'))
-      const token = JSON.parse(Buffer.concat([decipher.update(Buffer.from(row.ciphertext, 'base64url')), decipher.final()]).toString('utf8')) as MachineToken
+      const token = JSON.parse(Buffer.concat([decipher.update(Buffer.from(row.ciphertext, 'base64url')), decipher.final()]).toString('utf8')) as MachineToken | null
       if (!token || token.partition !== row.partition || typeof token.token !== 'string' || !/^[\x21-\x7e]{1,32768}$/u.test(token.token)
         || !Number.isSafeInteger(token.expiresAt) || !Number.isSafeInteger(token.acquiredAt)
         || !Array.isArray(token.scopes) || !token.scopes.every(value => typeof value === 'string')) throw new Error()
@@ -139,7 +139,12 @@ export class MachineConnectionStore {
       decipher.setAAD(this.historyAad(row)); decipher.setAuthTag(Buffer.from(box.tag, 'base64url'))
       const text = Buffer.concat([decipher.update(Buffer.from(box.ciphertext, 'base64url')), decipher.final()]).toString('utf8')
       if (Buffer.byteLength(text) > MACHINE_HISTORY_BYTES) throw new Error()
-      const history = JSON.parse(text) as History
+      const history = JSON.parse(text) as {
+        format?: number
+        status: string
+        migration?: Migration
+        records?: Array<MachineSentBearer | null>
+      } | null
       if (!history || history.format !== 1 || !['complete', 'migration'].includes(history.status)
         || !Array.isArray(history.records) || history.records.length > MACHINE_HISTORY_COUNT) throw new Error()
       if (history.status === 'migration') {
@@ -158,7 +163,7 @@ export class MachineConnectionStore {
           || values.has(record.value)) throw new Error()
         values.add(record.value)
       }
-      return history
+      return history as History
     } catch { throw new Error('credential_store_unavailable') }
   }
   private encodeHistory(row: Row, history: History, key: Buffer): Row {
@@ -325,18 +330,18 @@ export class MachineConnectionStore {
   }
   private async transaction<T>(run: (write: (row: Row) => Promise<void>) => Promise<T>): Promise<T> {
     await mkdir(this.root, { recursive: true, mode: 0o700 })
-    let entered = false
+    const lock = { entered: false }
     try {
       // The current Host owns the lock and the write; no detached writer can outlive it.
       return await withFileLock(this.file, async () => {
-        entered = true
+        lock.entered = true
         return run(async (row) => {
           try { await writeFileAtomic(this.file, JSON.stringify(row), { mode: 0o600, dirMode: 0o700 }) }
           catch { throw new Error('credential_store_unavailable') }
         })
       }, { waitMs: 10000 })
     } catch (error) {
-      if (!entered) throw new Error('connection_store_locked')
+      if (!lock.entered) throw new Error('connection_store_locked')
       throw error
     }
   }

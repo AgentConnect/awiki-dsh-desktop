@@ -216,9 +216,8 @@ async function publishTools(client: Client, ctx: Context, opts: ToolBridgeOption
     })
     const protection = opts.protection
     if (protection) {
-      const execute = definition.execute
       definitions.set(publicName, { ...definition, execute: (args, execution) => protection.run(async (check) => {
-        const value = await Promise.resolve().then(() => execute(args, execution)).catch(async (error) => {
+        const value = await Promise.resolve().then(() => definition.execute(args, execution)).catch(async (error: unknown) => {
           execution.signal.throwIfAborted()
           opts.signal.throwIfAborted()
           await check()

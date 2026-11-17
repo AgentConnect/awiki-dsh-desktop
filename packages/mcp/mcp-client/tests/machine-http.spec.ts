@@ -55,12 +55,12 @@ async function fixture(handler: (request: IncomingMessage, response: ServerRespo
   try { await run({ origin, server, sockets, connections: () => connections, send: createTestMachineFetch({ origin, ca }) }) }
   finally {
     for (const socket of sockets) socket.destroy()
-    await new Promise<void>(resolve => server.close(() => resolve()))
+    await new Promise<void>(resolve => server.close(() => { resolve() }))
   }
 }
 
 it('uses real DNS and the Node all-address lookup signature, verifies TLS and opens a fresh socket for each request', async () => {
-  const addresses = await dns.lookup('localhost', { all: true, verbatim: true })
+  const addresses = await dns.lookup('localhost', { all: true, order: 'verbatim' })
   expect(addresses.some(value => value.address === '127.0.0.1')).toBe(true)
   const hits: string[] = []
   await fixture((request, response) => {
@@ -129,7 +129,7 @@ it('rejects a mixed public/private DNS answer before opening a socket', async ()
   await fixture((_request, response) => { response.end('unexpected') }, async ({ origin, send, connections }) => {
     const lookup = lookupAll.mockResolvedValueOnce([{ address: '8.8.8.8', family: 4 }, { address: '169.254.169.254', family: 4 }])
     await expect(send(origin + '/metadata')).rejects.toThrow('unsafe_target')
-    expect(lookup).toHaveBeenCalledWith('localhost', { all: true, verbatim: true })
+    expect(lookup).toHaveBeenCalledWith('localhost', { all: true, order: 'verbatim' })
     expect(connections()).toBe(0)
   })
 })
@@ -138,7 +138,7 @@ it('rejects a proxied machine route before DNS, and handles DNS with no admissib
   const dispose = await installProxyFromEnvironment({ get: name => name === 'HTTPS_PROXY' ? { value: 'http://proxy.example:3128' } : undefined },
     () => undefined)
   try {
-    expect(() => assertMachineDirectRoute('https://target.example')).toThrow('proxy_egress_unsupported')
+    expect(() => { assertMachineDirectRoute('https://target.example') }).toThrow('proxy_egress_unsupported')
     expect(lookupAll).not.toHaveBeenCalled()
   } finally { await dispose() }
   lookupAll.mockResolvedValueOnce([])
@@ -194,7 +194,7 @@ it('cancels aborted and oversized request streams before transmitting any reques
     const controller = new AbortController()
     const stalled = new ReadableStream<Uint8Array>({ start(stream) { stream.enqueue(new Uint8Array([1])) }, cancel() { cancelled = true } })
     const pending = send(origin + '/upload', { method: 'POST', body: stalled, signal: controller.signal, duplex: 'half' } as RequestInit & { duplex: 'half' })
-    await vi.waitFor(() => expect(stalled.locked).toBe(true))
+    await vi.waitFor(() => { expect(stalled.locked).toBe(true) })
     controller.abort()
     await expect(pending).rejects.toThrow('network_failure')
     expect(cancelled).toBe(true)
@@ -218,7 +218,7 @@ it('destroys a real HTTPS request when cancelled before response headers', async
     await arrived
     controller.abort(new Error('private-abort-reason'))
     await expect(pending).rejects.toThrow('network_failure')
-    await vi.waitFor(() => expect(sockets.size).toBe(0))
+    await vi.waitFor(() => { expect(sockets.size).toBe(0) })
   })
 })
 
@@ -251,6 +251,6 @@ it('rejects duplicate names, invalid UTF-8, BOM, non-object JSON and incorrect J
     const value = cases[Number(request.url!.slice(1))]!
     response.writeHead(200, { 'content-type': value.contentType ?? 'application/json' }); response.end(value.body)
   }, async ({ origin, send }) => {
-    for (let index = 0; index < cases.length; index++) await expect(machineJson(await send(origin + '/' + index))).rejects.toThrow('incompatible_metadata')
+    for (let index = 0; index < cases.length; index++) await expect(machineJson(await send(`${origin}/${index}`))).rejects.toThrow('incompatible_metadata')
   })
 })

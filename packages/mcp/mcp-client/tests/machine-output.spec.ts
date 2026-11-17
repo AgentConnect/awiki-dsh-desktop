@@ -43,26 +43,26 @@ it('pins historical credentials through an in-flight SDK result and bounds elaps
 it('fails closed at token and byte capacity without evicting a possibly valid credential', () => {
   const r = new MachineBearerRedactor()
   for (let i = 0; i < 256; i++) r.remember(`private-opaque-${i}`, i, 86400000)
-  expect(() => r.remember('overflow', 999, 86400000)).toThrow('machine_secret_retention_full')
+  expect(() => { r.remember('overflow', 999, 86400000) }).toThrow('machine_secret_retention_full')
   expect(r.sanitize('private-opaque-0')).toBe('■■■')
   const bytes = new MachineBearerRedactor()
   for (let i = 0; i < 32; i++) bytes.remember(String.fromCharCode(65 + i) + 'a'.repeat(32767), i, 1000)
-  expect(() => bytes.remember('overflow', 1, 1000)).toThrow('machine_secret_retention_full')
+  expect(() => { bytes.remember('overflow', 1, 1000) }).toThrow('machine_secret_retention_full')
 })
 
 it('rejects invalid history inputs and preserves aliases in projected results', () => {
   const r = new MachineBearerRedactor(() => 1)
   for (const [value, lifetime] of [['', 1000], ['fixture', Infinity], ['fixture', 0], ['fixture', 86400001]] as const) {
-    expect(() => r.remember(value, 1, lifetime)).toThrow('invalid_token_lifetime')
+    expect(() => { r.remember(value, 1, lifetime) }).toThrow('invalid_token_lifetime')
   }
-  expect(() => r.rememberAssertion('x'.repeat(16385))).toThrow('invalid_client_assertion')
+  expect(() => { r.rememberAssertion('x'.repeat(16385)) }).toThrow('invalid_client_assertion')
   for (let i = 0; i < 16; i++) r.registerIdentity(`https://identity.example/${i}`)
   r.registerIdentity('https://identity.example/0')
-  expect(() => r.registerIdentity('https://identity.example/overflow')).toThrow('machine_identity_history_full')
+  expect(() => { r.registerIdentity('https://identity.example/overflow') }).toThrow('machine_identity_history_full')
   r.remember('test-secret', 1, 1000)
   r.remember('test-secret', 1, 1000)
   const child = { text: 'test-secret', empty: null }
-  const source: { [key: string]: unknown } = Object.create(null)
+  const source = Object.create(null) as Record<string, unknown>
   source.a = child
   source.b = child
   const projected = r.sanitize(source)
@@ -124,6 +124,11 @@ it('masks expired complete client-auth assertions for a confirmed local identity
   const [, payload, signature] = proof.split('.')
   const invalidPayload = `eyJfixture.invalid-json.${signature}`
   expect(reconstructed.sanitize(invalidPayload)).toBe(invalidPayload)
+  for (const payloadValue of [null, true]) {
+    const encoded = Buffer.from(JSON.stringify(payloadValue)).toString('base64url')
+    const nonObjectPayload = `${proof.split('.')[0]}.${encoded}.${signature}`
+    expect(reconstructed.sanitize(nonObjectPayload)).toBe(nonObjectPayload)
+  }
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
   const suffix = alphabet[alphabet.indexOf(signature!.slice(-1)) + 1]!
   const nonCanonical = proof.slice(0, -1) + suffix
