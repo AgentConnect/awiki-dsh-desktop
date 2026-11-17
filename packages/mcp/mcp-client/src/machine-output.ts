@@ -51,7 +51,8 @@ export class MachineBearerRedactor {
       for (const part of parts) { offsets.push(offset); offset += part.length + 1 }
       const spans: Array<{ start: number; end: number }> = []
       for (let i = 0; i + 2 < parts.length; i++) {
-        const payloadPart = parts[i + 1] ?? ''; const signature = (parts[i + 2] ?? '').slice(0, 86)
+        // The loop bounds guarantee three segments and their offsets.
+        const payloadPart = parts[i + 1] as string; const signature = (parts[i + 2] as string).slice(0, 86)
         if (!payloadPart || payloadPart.length > 16384 || signature.length !== 86) continue
         let claims: Record<string, unknown>
         try { claims = decode(payloadPart) } catch { continue }
@@ -60,7 +61,7 @@ export class MachineBearerRedactor {
           || !Number.isSafeInteger(claims.iat) || !Number.isSafeInteger(claims.exp)
           || (claims.exp as number) <= (claims.iat as number) || (claims.exp as number) - (claims.iat as number) > 60
           || typeof claims.jti !== 'string' || !claims.jti || claims.jti.length > 128) continue
-        const headerPart = parts[i] ?? ''; const tailStart = Math.max(0, headerPart.length - 16384)
+        const headerPart = parts[i] as string; const tailStart = Math.max(0, headerPart.length - 16384)
         for (let start = headerPart.indexOf('eyJ', tailStart); start >= 0; start = headerPart.indexOf('eyJ', start + 3)) {
           if (++attempts > 128) throw new Error('machine_output_assertion_limit')
           const headerText = headerPart.slice(start)
@@ -72,12 +73,12 @@ export class MachineBearerRedactor {
             || typeof header.kid !== 'string' || !/^[\x21-\x7e]{1,1024}$/u.test(header.kid)) continue
           const bytes = Buffer.from(signature, 'base64url')
           if (bytes.length !== 64 || bytes.toString('base64url') !== signature) continue
-          spans.push({ start: (offsets[i] ?? 0) + start, end: (offsets[i + 2] ?? 0) + 86 }); break
+          spans.push({ start: (offsets[i] as number) + start, end: (offsets[i + 2] as number) + 86 }); break
         }
       }
       let result = ''; let previous = 0
       for (const span of spans) {
-        if (span.start < previous) continue
+        // Ends advance with the candidate index. Slice contributes no text for overlapping spans.
         result += run.slice(previous, span.start) + '\u25a0\u25a0\u25a0'; previous = span.end
       }
       return result + run.slice(previous)
@@ -157,9 +158,7 @@ export class MachineBearerRedactor {
     const result = clone(value)
     const seen = new WeakMap<object, object>([[value, result]])
     const pending = [{ source: value, target: result }]
-    while (pending.length) {
-      const entry = pending.pop()
-      if (!entry) break
+    for (let entry = pending.pop(); entry; entry = pending.pop()) {
       const { source, target } = entry
       const ordinary = new Set(Object.keys(source).filter(key => text(key) === key))
       for (const [key, child] of Object.entries(source)) {

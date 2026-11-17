@@ -6,7 +6,7 @@ import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import assert from 'node:assert/strict'
 import { describe, expect, it, vi, beforeEach, onTestFinished } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { Transport } from '@modelcontextprotocol/client'
+import { Client, type Transport } from '@modelcontextprotocol/client'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -72,6 +72,8 @@ vi.mock('@modelcontextprotocol/client/stdio', () => ({
 // vi.mock is hoisted above static imports, so the module under test sees the
 // mocked SDK even through a static import.
 import { apply, name, inject, Config as ConfigSchema } from '@deepseek-ai/dsh-mcp-client/src/index.ts'
+import { syncTools } from '@deepseek-ai/dsh-mcp-client/src/tools.ts'
+import type { MachineOutputProtection } from '@deepseek-ai/dsh-mcp-client/src/machine-output.ts'
 
 // ---- Helpers ----
 
@@ -408,6 +410,26 @@ describe('apply (plugin lifecycle)', () => {
     await vi.waitFor(() => { expect(ctx.tools.get('mcp__srv__updated')).toBeDefined() })
   })
 
+  it('validates the active machine binding on live list refresh and rejects names containing credentials', async () => {
+    const client = new Client({ name: 'fixture', version: '1' }, {
+      listChanged: { tools: { onChanged: () => {} } },
+    })
+    const assertActive = vi.fn(async () => {})
+    const protection: MachineOutputProtection = {
+      run: operation => operation(assertActive),
+      sanitize: value => typeof value === 'object' && value && 'name' in value && value.name === 'fixture-secret'
+        ? { ...value, name: 'redacted' } : value,
+    }
+    const options = { protection, signal: new AbortController().signal, serverName: 'refresh', toolCallTimeoutMs: 1000 }
+    const previous = await syncTools(client, ctx, options, new Map())
+    expect(assertActive).toHaveBeenCalledTimes(1)
+    mockListTools.mockResolvedValueOnce({ tools: [{ name: 'fixture-secret', inputSchema: { type: 'object' } }] })
+    await expect(syncTools(client, ctx, options, previous)).rejects.toThrow('tool name contains private credentials')
+    expect(ctx.tools.get('mcp__refresh__remote')).toBeDefined()
+    expect(ctx.tools.get('mcp__refresh__redacted')).toBeUndefined()
+    for (const dispose of previous.values()) dispose()
+  })
+
   it('keeps the previous generation when a re-sync fails', async () => {
     await apply(ctx, stdioConfig)
     expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
@@ -474,6 +496,25 @@ describe('apply (plugin lifecycle)', () => {
 
     expect(mockConnect).toHaveBeenCalled()
     expect(ctx.tools.get('mcp__web__remote')).toBeDefined()
+  })
+
+  it('rejects invalid CIMD options before opening a transport', async () => {
+    const url = 'https://resource.example/mcp'
+    const issuer = 'https://authority.example'
+    const credential = { clientId: 'https://client.example/cimd.json', resource: url, issuer, keyId: 'example' }
+    const base = { mode: 'cimd-client-credentials' as const, connectionId: 'example', credentialRef: 'MCP_KEY',
+      provider: 'credentials', credential, issuer, stateRoot: '/private-store', encryptionKeyRef: 'MCP_STORE', requestedScopes: ['tool.read'] }
+    for (const overrides of [
+      { expandTemplates: true }, { headers: { Authorization: 'Bearer fixture' } },
+      { authentication: { ...base, stateRoot: 'relative' } },
+      { authentication: { ...base, provider: 'external' } },
+      { authentication: { ...base, credential: { ...credential, resource: 'https://resource.example/other' } } },
+      { authentication: { ...base, issuer: 'https://other.example' } },
+    ]) {
+      const config = ConfigSchema({ transport: 'streamable-http', serverName: 'invalid', url, authentication: base, ...overrides })
+      await expect(apply(ctx, config)).rejects.toMatchObject({ code: 'MCP_MACHINE_CONFIGURATION' })
+    }
+    expect(mockConnect).not.toHaveBeenCalled()
   })
 })
 

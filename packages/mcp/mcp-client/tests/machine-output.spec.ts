@@ -50,6 +50,29 @@ it('fails closed at token and byte capacity without evicting a possibly valid cr
   expect(() => bytes.remember('overflow', 1, 1000)).toThrow('machine_secret_retention_full')
 })
 
+it('rejects invalid history inputs and preserves aliases in projected results', () => {
+  const r = new MachineBearerRedactor(() => 1)
+  for (const [value, lifetime] of [['', 1000], ['fixture', Infinity], ['fixture', 0], ['fixture', 86400001]] as const) {
+    expect(() => r.remember(value, 1, lifetime)).toThrow('invalid_token_lifetime')
+  }
+  expect(() => r.rememberAssertion('x'.repeat(16385))).toThrow('invalid_client_assertion')
+  for (let i = 0; i < 16; i++) r.registerIdentity(`https://identity.example/${i}`)
+  r.registerIdentity('https://identity.example/0')
+  expect(() => r.registerIdentity('https://identity.example/overflow')).toThrow('machine_identity_history_full')
+  r.remember('test-secret', 1, 1000)
+  r.remember('test-secret', 1, 1000)
+  const child = { text: 'test-secret', empty: null }
+  const source: { [key: string]: unknown } = Object.create(null)
+  source.a = child
+  source.b = child
+  const projected = r.sanitize(source)
+  expect(Object.getPrototypeOf(projected)).toBeNull()
+  expect(projected.a).toBe(projected.b)
+  expect(projected.a).toEqual({ text: '■■■', empty: null })
+  expect(r.sanitize(null)).toBe(null)
+  expect(r.sanitize(0)).toBe(0)
+})
+
 it('does not create a different known bearer at a replacement boundary', () => {
   const r = new MachineBearerRedactor()
   r.remember('long-private-value', 1, 300000)
@@ -92,4 +115,21 @@ it('masks expired complete client-auth assertions for a confirmed local identity
   expect(reconstructed.sanitize(pap)).toBe(pap)
   const long = jwt(header, { ...claims, exp: 601 })
   expect(reconstructed.sanitize(long)).toBe(long)
+  const missingAudience = jwt(header, { ...claims, aud: 1 })
+  expect(reconstructed.sanitize(missingAudience)).toBe(missingAudience)
+  const malformedAudience = jwt(header, { ...claims, aud: 'missing URL scheme' })
+  expect(reconstructed.sanitize(malformedAudience)).toBe(malformedAudience)
+  const shortSignature = proof.slice(0, -1)
+  expect(reconstructed.sanitize(shortSignature)).toBe(shortSignature)
+  const [, payload, signature] = proof.split('.')
+  const invalidPayload = `eyJfixture.invalid-json.${signature}`
+  expect(reconstructed.sanitize(invalidPayload)).toBe(invalidPayload)
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+  const suffix = alphabet[alphabet.indexOf(signature!.slice(-1)) + 1]!
+  const nonCanonical = proof.slice(0, -1) + suffix
+  expect(reconstructed.sanitize(nonCanonical)).toBe(nonCanonical)
+  const oversized = `eyJ${'A'.repeat(16380)}.${payload}.${signature}`
+  expect(reconstructed.sanitize(oversized)).toBe(oversized)
+  const candidates = `${'eyJ'.repeat(129)}.${payload}.${signature}`
+  expect(() => reconstructed.sanitize(candidates)).toThrow('machine_output_assertion_limit')
 })

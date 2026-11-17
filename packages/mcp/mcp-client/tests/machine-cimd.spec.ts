@@ -61,6 +61,7 @@ it.each(['modern', 'legacy'])('loads a %s machine connection through challenge a
   let nextToolResponse: ((response: ServerResponse, id: number) => void) | undefined
   let nextListing: ((reply: () => void) => void) | undefined
   let nextRead: ((reply: () => void) => void) | undefined
+  let readError = false
   let instructions = 'fixture server instructions'
   let toolCalls = 0
   const cancellationNotice = Promise.withResolvers<unknown>()
@@ -140,11 +141,14 @@ it.each(['modern', 'legacy'])('loads a %s machine connection through challenge a
             return result({ content: [{ type: 'text', text: `catalog entry ${request.headers.authorization}` }] })
           }
           case 'resources/read': {
-            const reply = () => response.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: {
-              resultType: 'complete', ttlMs: 0, cacheScope: 'private', contents: [{ uri: 'test://resource', text: 'stale resource result' }],
-            } }))
+            if (readError) return json(response, { jsonrpc: '2.0', id: rpc.id,
+              error: { code: -32603, message: `fixture resource refusal ${request.headers.authorization}` } })
             const read = nextRead
             nextRead = undefined
+            const text = read ? 'stale resource result' : 'current resource result'
+            const reply = () => response.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: {
+              resultType: 'complete', ttlMs: 0, cacheScope: 'private', contents: [{ uri: 'test://resource', text }],
+            } }))
             response.writeHead(200, { 'content-type': 'application/json', 'x-fixture-held': 'yes' })
             if (read) { response.flushHeaders(); read(reply) }
             else reply()
@@ -182,6 +186,7 @@ it.each(['modern', 'legacy'])('loads a %s machine connection through challenge a
     const config = {
       transport: 'streamable-http', serverName: 'cimd', url: `${origin}/mcp`, failOnStartupError: true,
       reconnect: { enabled: false }, authentication: { mode: 'cimd-client-credentials', connectionId: 'cimd-test', credentialRef: 'CIMD_SIGNING_KEY',
+        ...(era === 'modern' ? { issuer: `${origin}/issuer` } : {}),
         ...(era === 'legacy' ? { provider: 'fixture' } : { provider: 'credentials', credential }),
         stateRoot: join(root, 'state'), encryptionKeyRef: 'CIMD_STORAGE_KEY', requestedScopes: ['catalog.read'] },
     }
@@ -263,6 +268,17 @@ it.each(['modern', 'legacy'])('loads a %s machine connection through challenge a
     const staleResource = await oldResource
     expect(staleResource.isError).toBe(true)
     expect(JSON.stringify(staleResource)).not.toContain('stale resource result')
+    readError = true
+    const refusedResource = await executeToolFixture(context, { name: 'read_mcp_resource', arguments: { server: 'cimd', uri: 'test://resource' },
+      callId: ToolCallId('cimd-resource-refused'), signal: new AbortController().signal })
+    expect(refusedResource.isError).toBe(true)
+    expect(JSON.stringify(refusedResource)).toContain('fixture resource refusal')
+    expect(JSON.stringify(refusedResource)).not.toContain('private-token-')
+    readError = false
+    const currentResource = await executeToolFixture(context, { name: 'read_mcp_resource',
+      arguments: { server: 'cimd', uri: 'test://resource' }, callId: ToolCallId('cimd-resource-recovered'), signal: new AbortController().signal })
+    expect(currentResource.isError).toBe(false)
+    expect(JSON.stringify(currentResource)).toContain('current resource result')
 
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
     for (const format of ['json', 'sse']) {
@@ -330,6 +346,8 @@ it.each(['modern', 'legacy'])('loads a %s machine connection through challenge a
     nextListing = listing.resolve
     const mounting = include()
     const finishListing = await listing.promise
+    const startupFiber = installed()!
+    McpClient.connectionStatusOf(startupFiber)?.onChange(() => { throw new Error('fixture status observer') })
     clientKey = key()
     await putKey()
     finishListing()

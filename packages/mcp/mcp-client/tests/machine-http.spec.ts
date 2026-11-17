@@ -7,8 +7,10 @@ import { execFileSync } from 'node:child_process'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { getDefaultAutoSelectFamily, setDefaultAutoSelectFamily } from 'node:net'
+import { installProxyFromEnvironment } from '@deepseek-ai/dsh-http-proxy'
 import { afterAll, afterEach, beforeAll, expect, it, vi } from 'vitest'
-import { createTestMachineFetch, machineFetch, machineJson, machineUrl, publicAddress } from '../src/machine-http.ts'
+import { assertMachineDirectRoute, createTestMachineFetch, machineFetch, machineJson, machineUrl, publicAddress } from '../src/machine-http.ts'
 
 vi.mock('node:dns/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:dns/promises')>()
@@ -106,6 +108,7 @@ it('requires its exact test origin, NODE_ENV=test and explicit CA while preservi
 })
 
 it('rejects URL normalization before DNS and blocks every non-public numeric destination', async () => {
+  expect(() => machineUrl('not an HTTPS URL')).toThrow('invalid_target')
   for (const value of ['http://example.com/', 'https://2130706433/', 'https://0x7f000001/', 'https://example.com/a/../b', 'https://example.com/%2e/b', 'https://example.com/?query=one', 'https://user:password@example.com/']) {
     expect(() => machineUrl(value)).toThrow('invalid_target')
     await expect(machineFetch(value)).rejects.toThrow('invalid_target')
@@ -116,6 +119,12 @@ it('rejects URL normalization before DNS and blocks every non-public numeric des
   for (const url of ['https://192.88.99.1/', 'https://[3fff::1]/', 'https://[::ffff:808:808]/']) await expect(machineFetch(url)).rejects.toThrow('unsafe_target')
 })
 
+it('accepts insignificant whitespace in an otherwise valid OAuth document', async () => {
+  const json = ' { "grants" : [ "client_credentials" , true ] } '
+  expect(await machineJson(new Response(json, { headers: { 'content-type': 'application/json' } })))
+    .toEqual({ grants: ['client_credentials', true] })
+})
+
 it('rejects a mixed public/private DNS answer before opening a socket', async () => {
   await fixture((_request, response) => { response.end('unexpected') }, async ({ origin, send, connections }) => {
     const lookup = lookupAll.mockResolvedValueOnce([{ address: '8.8.8.8', family: 4 }, { address: '169.254.169.254', family: 4 }])
@@ -123,6 +132,46 @@ it('rejects a mixed public/private DNS answer before opening a socket', async ()
     expect(lookup).toHaveBeenCalledWith('localhost', { all: true, verbatim: true })
     expect(connections()).toBe(0)
   })
+})
+
+it('rejects a proxied machine route before DNS, and handles DNS with no admissible result', async () => {
+  const dispose = await installProxyFromEnvironment({ get: name => name === 'HTTPS_PROXY' ? { value: 'http://proxy.example:3128' } : undefined },
+    () => undefined)
+  try {
+    expect(() => assertMachineDirectRoute('https://target.example')).toThrow('proxy_egress_unsupported')
+    expect(lookupAll).not.toHaveBeenCalled()
+  } finally { await dispose() }
+  lookupAll.mockResolvedValueOnce([])
+  await expect(machineFetch('https://target.example')).rejects.toThrow('unsafe_target')
+  const abort = new AbortController()
+  abort.abort()
+  await expect(machineFetch('https://target.example', { signal: abort.signal })).rejects.toThrow('network_failure')
+  expect(lookupAll).toHaveBeenCalledTimes(1)
+})
+
+it('retains repeated response headers and accepts an empty no-content response', async () => {
+  const family = getDefaultAutoSelectFamily()
+  setDefaultAutoSelectFamily(false)
+  try {
+    await fixture((_request, response) => {
+      response.writeHead(204, { 'set-cookie': ['name=a', 'other=b'] }).end()
+    }, async ({ origin, send }) => {
+      const response = await send(origin)
+      expect(response.status).toBe(204)
+      expect(response.body).toBeNull()
+      expect(response.headers.getSetCookie()).toEqual(['name=a', 'other=b'])
+    })
+  } finally { setDefaultAutoSelectFamily(family) }
+  await expect(machineJson(new Response())).rejects.toThrow('incompatible_metadata')
+})
+
+it('abandons a lookup that is cancelled synchronously before handing ownership to the waiter', async () => {
+  const controller = new AbortController()
+  lookupAll.mockImplementationOnce(async () => {
+    controller.abort()
+    return [{ address: '8.8.8.8', family: 4 }]
+  })
+  await expect(machineFetch('https://target.example', { signal: controller.signal })).rejects.toThrow('network_failure')
 })
 
 it('aborts a DNS wait without opening a late socket or exposing the abort reason', async () => {

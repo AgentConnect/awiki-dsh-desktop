@@ -98,7 +98,6 @@ export class MachineConnectionStore {
       const key = await this.key()
       try {
         const history: History = row ? this.decodeHistory(row, key) : { format: 1, status: 'complete', records: [] }
-        if (row && !row.active) throw new Error('connection_disabled')
         this.requireComplete(history)
         if (!row || row.partition !== partition) {
           if (row) this.seedCurrent(row, history, key)

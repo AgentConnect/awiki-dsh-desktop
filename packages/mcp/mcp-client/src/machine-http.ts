@@ -177,12 +177,9 @@ function strictJson(text: string): unknown {
   const whitespace = () => { while (index < text.length && /[ \t\r\n]/u.test(text.charAt(index))) index++ }
   const string = (): string => {
     const start = index++
-    while (index < text.length) {
-      const char = text[index++]
-      if (char === '\\') index++
-      else if (char === '"') return JSON.parse(text.slice(start, index)) as string
-    }
-    throw new Error('incompatible_metadata')
+    // The complete document has already passed JSON.parse, so this token has a closing quote.
+    while (text[index] !== '"') index += text[index] === '\\' ? 2 : 1
+    return JSON.parse(text.slice(start, ++index)) as string
   }
   const visit = (depth: number): void => {
     if (depth > 32) throw new Error('incompatible_metadata')

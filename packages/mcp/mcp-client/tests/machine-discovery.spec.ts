@@ -62,3 +62,32 @@ it.each([
   const f = fixture(() => Response.json(resourceDocument), () => Response.json({ ...authorityDocument, ...changed }))
   await expect(f.run()).rejects.toMatchObject({ code: 'MCP_MACHINE_DISCOVERY' })
 })
+
+it('closes an unauthenticated legacy negotiation session before using the root resource metadata', async () => {
+  const endpoint = 'https://resource.example/'
+  const operations: string[] = []
+  const send: typeof machineFetch = async (input) => {
+    const request = new Request(input)
+    if (request.url === rootMetadata) return Response.json({ resource: endpoint, authorization_servers: [issuer] })
+    if (request.url === asMetadata) return Response.json(authorityDocument)
+    expect(request.url).toBe(endpoint)
+    expect(request.headers.has('authorization')).toBe(false)
+    if (request.method === 'DELETE') {
+      operations.push('delete')
+      expect(request.headers.get('mcp-session-id')).toBe('fixture-probe-session')
+      return new Response(null, { status: 204 })
+    }
+    if (request.method === 'GET') return new Response(null, { status: 405 })
+    const rpc = await request.json() as { method: string; id?: number }
+    operations.push(rpc.method)
+    if (rpc.method === 'initialize') return Response.json({ jsonrpc: '2.0', id: rpc.id, result: {
+      protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'fixture', version: '1' },
+    } }, { headers: { 'mcp-session-id': 'fixture-probe-session' } })
+    if (rpc.method === 'notifications/initialized') return new Response(null, { status: 202 })
+    return Response.json({ jsonrpc: '2.0', id: rpc.id, error: { code: -32601, message: 'Method not found' } })
+  }
+  await expect(discoverMachineTarget(endpoint, undefined, send, new AbortController().signal)).resolves.toMatchObject({
+    resource: endpoint, sources: { resource: rootMetadata },
+  })
+  expect(operations).toEqual(['server/discover', 'initialize', 'notifications/initialized', 'delete'])
+})
