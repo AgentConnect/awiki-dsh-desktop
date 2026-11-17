@@ -20,6 +20,7 @@ import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import Tools from '@deepseek-ai/dsh-tools'
 import { expect, it, vi } from 'vitest'
 import * as McpClient from '../src/index.ts'
+import { discoverMachineTarget } from '../src/machine-discovery.ts'
 import { createTestMachineFetch, type machineFetch } from '../src/machine-http.ts'
 import { MachineConnectionStore, type MachineToken } from '../src/machine-store.ts'
 import { McpSigningProviderRegistry, signingProvider } from '../src/signing-provider.ts'
@@ -217,4 +218,26 @@ it('validates an external signer configuration without built-in credential field
       requestedScopes: ['catalog.read'], stateRoot: '/tmp/fixture', encryptionKeyRef: 'MCP_STATE_KEY' } })
   expect(config).toMatchObject({ authentication: { provider: 'alternate', credentialRef: 'registered' } })
   expect(config.transport === 'streamable-http' && config.authentication).not.toHaveProperty('credential')
+})
+
+it.each([
+  { selected: 'https://issuer.example/other', metadata: 'https://issuer.example/tenant', reads: 0 },
+  { selected: 'https://issuer.example/tenant', metadata: 'https://issuer.example/tenant/', reads: 1 },
+])('refuses a different configured or returned issuer before any Token request', async ({ selected, metadata, reads }) => {
+  const resource = 'https://resource.example/mcp'
+  const issuer = 'https://issuer.example/tenant'
+  let asReads = 0
+  const send: typeof machineFetch = async (input, init) => {
+    const request = new Request(input, init)
+    if (request.url === resource) return new Response(null, { status: 401,
+      headers: { 'www-authenticate': 'Bearer resource_metadata="https://resource.example/prm"' } })
+    if (request.url === 'https://resource.example/prm') return Response.json({ resource, authorization_servers: [issuer] })
+    expect(request.url).toBe('https://issuer.example/.well-known/oauth-authorization-server/tenant')
+    asReads++
+    return Response.json({ issuer: metadata, token_endpoint: 'https://issuer.example/token', client_id_metadata_document_supported: true,
+      grant_types_supported: ['client_credentials'], token_endpoint_auth_methods_supported: ['private_key_jwt'],
+      token_endpoint_auth_signing_alg_values_supported: ['ES256'] })
+  }
+  await expect(discoverMachineTarget(resource, selected, send, new AbortController().signal)).rejects.toMatchObject({ code: 'MCP_MACHINE_DISCOVERY' })
+  expect(asReads).toBe(reads)
 })
