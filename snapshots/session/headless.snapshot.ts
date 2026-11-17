@@ -1,12 +1,13 @@
 /** Recorded-session replay through the shipped headless `dsh` profile. */
 
 import { startHttpMcpFixture } from '../../packages/mcp/mcp-client/tests/http-fixture.ts'
+import { startCimdSnapshotServer } from '../../packages/mcp/mcp-client/tests/fixtures/cimd-snapshot-server.ts'
 import { chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, relative, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import ts from 'typescript'
 import { deriveEventMessage, foldSurface, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
@@ -1399,6 +1400,8 @@ describe('headless recorded-session snapshots', () => {
       const locatorRoot = snapshotSpillRoot(fixturePath)
       const mcpDemo = scenario.name === 'plugin-manager-mcp' || scenario.name === 'mcp-template-error'
         ? await startHttpMcpFixture({ rejectToolCalls: scenario.name === 'mcp-template-error' }) : undefined
+      const cimd = scenario.name === 'mcp-cimd' ? await startCimdSnapshotServer() : undefined
+      const cimdPreload = pathToFileURL(join(repoRoot, 'packages/mcp/mcp-client/tests/fixtures/cimd-snapshot-preload.mjs')).href
       let result: Awaited<ReturnType<typeof runLoaderSmoke>>
       try {
         result = await runLoaderSmoke({
@@ -1408,6 +1411,7 @@ describe('headless recorded-session snapshots', () => {
           ...(scenario.manifest.workspace?.parent === 'outside-temp' ? { tempDirParent: outsideTempWorkspaceParent() } : {}),
           binScript: dshBin,
           sourceImport: 'tsx/esm',
+          ...(cimd === undefined ? {} : { mode: 'src' as const }),
           configPath: join(baseComposition.dir, 'cordis.yml'),
           binArgs: [
             '--profile', 'headless',
@@ -1443,9 +1447,14 @@ describe('headless recorded-session snapshots', () => {
             ...(scenario.name === 'mcp-resources' || scenario.name === 'mcp-resources-ptc' ? {
               DSH_MCP_RESOURCES_FIXTURE: join(repoRoot, 'packages/mcp/mcp-client/tests/fixtures/resources-server.ts'),
             } : {}),
-            NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning',
+              ...(cimd === undefined ? [] : [`--import=${cimdPreload}`])].filter(Boolean).join(' '),
             DSH_TELEMETRY_DISABLED: '1',
             ...(mcpDemo === undefined ? {} : { DSH_MCP_DEMO_URL: mcpDemo.url }),
+            ...(cimd === undefined ? {} : {
+              DSH_CIMD_SNAPSHOT_ORIGIN: cimd.origin, DSH_CIMD_SNAPSHOT_TLS_CA: cimd.certPath,
+              DSH_CIMD_SNAPSHOT_SIGNING_KEY: cimd.signingKey, DSH_CIMD_SNAPSHOT_STORAGE_KEY: cimd.storageKey,
+            }),
           },
           prepare: async (cwd) => {
             if (scenario.manifest.workspace?.parent === 'outside-temp') assertWorkspaceOutsideTemp(cwd)
@@ -1465,6 +1474,12 @@ describe('headless recorded-session snapshots', () => {
           },
           inspect: async (cwd) => {
             actualLogs = await persistedSessions(cwd)
+            if (cimd !== undefined) {
+              expect(cimd.calls).toEqual(['catalog'])
+              expect(cimd.issued).toBe(1)
+              expect(actualLogs[0]?.content).toContain('Catalog entry (probe ■■■)')
+              expect(actualLogs[0]?.content).not.toContain(cimd.bearer)
+            }
             if (scenario.name === 'empty-response-retry-current') {
               const events = parseSessionLog(actualLogs[0]!.content)
               expect(events.filter(event => event.type === 'assistant/attempt' || event.type === 'llm/retry'
@@ -1575,6 +1590,7 @@ describe('headless recorded-session snapshots', () => {
         })
       } finally {
         await mcpDemo?.close()
+        await cimd?.close()
         await rm(spillRoot, { recursive: true, force: true })
       }
 

@@ -2492,7 +2492,7 @@ export interface LspLocalServerConfig {
 ## `@deepseek-ai/dsh-mcp-client`
 
 - `inject`: `tools`
-- `source`: [`packages/mcp/mcp-client/src/index.ts:140`](../packages/mcp/mcp-client/src/index.ts)
+- `source`: [`packages/mcp/mcp-client/src/index.ts:151`](../packages/mcp/mcp-client/src/index.ts)
 
 ```ts config-catalog
 /** Configuration for one stdio or Streamable HTTP MCP server. */
@@ -2546,6 +2546,11 @@ export interface StreamableHttpConfig {
   url: string
   /** Additional headers attached to MCP requests. */
   headers: Record<string, string>
+  /** Optional Host-owned CIMD machine authentication. */
+  authentication?: {
+    /** Use the ordinary Streamable HTTP connection. */
+    mode: 'none'
+  } | MachineAuthentication
   /** Timeout per tool call or resource request in milliseconds. */
   toolCallTimeoutMs: number
   /** Optional budget for one connection attempt plus its initial tool sync, in milliseconds. */
@@ -2572,6 +2577,40 @@ export interface ReconnectConfig {
   maxDelayMs?: number
   /** Consecutive failed attempts per outage before giving up for good (default 10). */
   maxAttempts?: number
+}
+
+/** Explicit machine authentication settings for one Streamable HTTP connection. */
+export interface MachineAuthentication {
+  /** Use CIMD discovery and the OAuth client-credentials grant. */
+  mode: 'cimd-client-credentials'
+  /** Stable Host-wide connection id used for encrypted Token state. */
+  connectionId: string
+  /** Explicit registered signer name, or `credentials` for the built-in signer. */
+  provider: string
+  /** Signer-specific reference. The built-in signer resolves a Host credential reference. */
+  credentialRef: string
+  /** Pins an issuer if discovery advertises several. */
+  issuer?: string
+  /** Built-in signer settings, only for `provider: credentials`. */
+  credential?: CredentialSigningConfig
+  /** Minimum nonempty scope set for the connection. */
+  requestedScopes: string[]
+  /** Absolute protected directory for the encrypted Token and sent-Bearer history. */
+  stateRoot: string
+  /** Host credential reference for the 32-byte base64url storage key. */
+  encryptionKeyRef: string
+}
+
+/** Operator-pinned settings for the built-in Cordis credentials signer. */
+export interface CredentialSigningConfig {
+  /** Public HTTPS client metadata document URL. */
+  clientId: string
+  /** Published ES256 key identifier. */
+  keyId: string
+  /** Exact authorization server issuer allowed by this credential. */
+  issuer: string
+  /** Exact MCP resource allowed by this credential. */
+  resource: string
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-mcp-client -->

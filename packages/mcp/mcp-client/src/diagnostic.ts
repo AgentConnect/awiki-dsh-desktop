@@ -14,6 +14,11 @@ import { HarnessError } from '@deepseek-ai/dsh-error'
  * - `MCP_CREDENTIAL_NOT_FOUND`: a referenced credential has no configured value.
  * - `MCP_INSTRUCTIONS_TOO_LARGE`: server instructions exceed `maxInstructionBytes`.
  * - `MCP_TOOL_REGISTRATION_FAILED`: a foreign registration occupies the server's tool namespace.
+ * - `MCP_MACHINE_CONFIGURATION`: the machine authentication configuration is invalid.
+ * - `MCP_MACHINE_DISCOVERY`: resource or issuer discovery could not verify the configured target.
+ * - `MCP_MACHINE_SIGNER_UNAVAILABLE`: no current signing permission is available.
+ * - `MCP_MACHINE_TOKEN_FAILED`: the authorization server did not supply a usable Token.
+ * - `MCP_MACHINE_STATE_UNAVAILABLE`: the persisted Token state cannot be used safely.
  */
 export const MCP_LOCAL_ERROR_CODES = [
   'MCP_CONNECTION_CLOSED',
@@ -22,6 +27,11 @@ export const MCP_LOCAL_ERROR_CODES = [
   'MCP_CREDENTIAL_NOT_FOUND',
   'MCP_INSTRUCTIONS_TOO_LARGE',
   'MCP_TOOL_REGISTRATION_FAILED',
+  'MCP_MACHINE_CONFIGURATION',
+  'MCP_MACHINE_DISCOVERY',
+  'MCP_MACHINE_SIGNER_UNAVAILABLE',
+  'MCP_MACHINE_TOKEN_FAILED',
+  'MCP_MACHINE_STATE_UNAVAILABLE',
 ] as const
 
 /** One {@link McpLocalError} code. */

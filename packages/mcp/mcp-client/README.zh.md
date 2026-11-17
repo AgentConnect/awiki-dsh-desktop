@@ -73,6 +73,15 @@ kind: "package-reference"
 
 启动后，服务器的工具会以 `mcp__<serverName>__<tool>` 形式出现——试着用一条提示词调用其中一个。如果初始连接失败，harness 仍会启动，但该服务器的工具不会出现，并会记录一条错误。设置 `failOnStartupError: true` 会拒绝插件激活；[app-boot 的启动策略](../../boot/app-boot/README.zh.md)仍允许可选 MCP 配置项失败，而不中止 harness。
 
+<a id="cimd-machine-authentication"></a>
+### CIMD 机器认证
+
+要连接机器身份，在 `cordis.yml` 中直接加载 `@deepseek-ai/dsh-mcp-client`，设置 `transport: streamable-http` 和 `authentication.mode: cimd-client-credentials`。资源和授权服务器须支持 CIMD 和 ES256 `private_key_jwt` 的 OAuth 客户端凭证授权。连接先发现资源，再发送断言。机器传输用经过校验的直连 HTTPS，代理路由生效时会阻止连接。
+
+选择 `authentication.provider: credentials` 时，将 `credentialRef` 指向 Host 凭据服务中的 P-256 PKCS#8 PEM 私钥。将 `credential.clientId` 设为已发布的 CIMD URL，`credential.keyId` 设为已发布的密钥标识。将 `credential.issuer` 和 `credential.resource` 设为获准的精确 issuer 与 MCP 资源 URL。在 `encryptionKeyRef` 下存放单独的 32 字节 base64url 加密密钥。配置稳定的 `connectionId`、绝对私有目录 `stateRoot` 和非空的最小权限 `requestedScopes`。
+
+Host 插件可用 `new McpSigningProviderRegistry(ctx).register(name, provider)` 注册签名器，再通过 `authentication.provider` 按名称选用。类型入口导出 `McpSigningProvider` 和 `McpSigningLease`。签名器收到原始 MCP Loader Context 与已校验的请求目标。移除 Provider 后，其租约失效。资源公布多个 issuer 时须明确选择。Token 到期或被拒绝后，下一次独立操作可申请新 Token。已发出的业务操作不会因认证修复自动重放。
+
 ### 工具命名与共存
 
 模型看到每个工具都带有稳定的服务器限定名称：`mcp__<serverName>__<rawName>`，例如 `mcp__github__create_issue`——与 Claude Code 和 Codex 使用的命名形态相同。只要服务器保持相同的工具名称，名称就保持不变，因此会话历史与权限规则在重启和重载后仍然有效。两个服务器可以同时提供名为 `search` 的工具，分别以 `mcp__github__search` 和 `mcp__web__search` 共存。

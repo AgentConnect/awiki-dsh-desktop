@@ -30,6 +30,7 @@ import { MissingTemplateValue } from './templates.ts'
 import { McpToolRegistrationError, syncTools } from './tools.ts'
 import type { ToolDisposers } from './tools.ts'
 import type { Config } from './index.ts'
+import { MachineAuthenticationSession } from './machine-auth.ts'
 
 /** Automatic reconnect policy for one MCP server connection. */
 export interface ReconnectConfig {
@@ -130,8 +131,15 @@ export interface ConnectionHandle extends ServerContext {
 export function startConnection(ctx: Context, config: Config, policy: ResolvedReconnectPolicy, status: McpStatusCell): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
   const binding = new McpTemplateBinding(ctx, config)
-  const diagnostic = (error: unknown, operation: string): string => binding.diagnostic(error, operation)
   const lifetime = new AbortController()
+  const machine = config.transport === 'streamable-http' && config.authentication?.mode === 'cimd-client-credentials'
+    ? new MachineAuthenticationSession(ctx, config.authentication, config.url, lifetime.signal) : undefined
+  const diagnostic = (error: unknown, operation: string): string => {
+    const detail = binding.diagnostic(error, operation)
+    return machine ? machine.protection.sanitize(detail) : detail
+  }
+  const redact = machine ? (text: string) => machine.protection.sanitize(text)
+    : config.expandTemplates ? (text: string) => binding.redact(text) : undefined
   const readiness = Promise.withResolvers<ConnectionOutcome>()
   type Generation = { wire: McpGeneration; connectedAt?: number }
   let current: Generation | undefined
@@ -187,7 +195,8 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
           serverName: config.serverName,
           toolCallTimeoutMs: config.toolCallTimeoutMs,
           signal,
-          ...config.expandTemplates ? { redact: (text: string) => binding.redact(text) } : {},
+          ...(redact ? { redact } : {}),
+          ...(machine ? { protection: machine.protection } : {}),
         }, disposers, () => isCurrent(record))
       })
     })
@@ -311,9 +320,11 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         : config.startupTimeoutMs - (Date.now() - startedAt)
       const resolved = await record.wire.run(signal => binding.resolve(signal), remaining())
       bindingValue = { config: resolved }
-      await record.wire.connect(resolved, remaining())
+      await record.wire.connect(resolved, remaining(), machine?.fetch)
       if (!isCurrent(record)) return
-      const text = client.getInstructions()?.trimEnd() ?? ''
+      const instructionsText = client.getInstructions()?.trimEnd() ?? ''
+      await machine?.protection.assertActive()
+      const text = machine ? machine.protection.sanitize(instructionsText) : instructionsText
       const instructions = text ? `### MCP server: ${config.serverName}\n\n${text}` : ''
       const maxInstructionBytes = config.maxInstructionBytes ?? DEFAULT_MAX_INSTRUCTION_BYTES
       if (Buffer.byteLength(instructions) > maxInstructionBytes) throw new McpLocalError(`${label}: server instructions exceed maxInstructionBytes (${maxInstructionBytes})`, 'MCP_INSTRUCTIONS_TOO_LARGE')
@@ -331,7 +342,8 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       if (current !== record) return
       current = undefined
       const confirmed = await close(record)
-      readiness.resolve({ error: config.expandTemplates ? new Error(diagnostic(error, 'startup')) : error })
+      readiness.resolve({ error: machine ? mcpRequestError(error, 'startup', redact)
+        : config.expandTemplates ? new Error(diagnostic(error, 'startup')) : error })
       if (disposed || !confirmed) return
       if (error instanceof MissingTemplateValue) {
         bindingValue = {}
@@ -353,7 +365,8 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         const record = current
         if (record?.connectedAt === undefined) throw new McpToolError(`${label}: server is disconnected`, 'MCP_SERVER_UNAVAILABLE')
         try {
-          return await record.wire.run(async (signal) => {
+          await machine?.protection.prepare?.()
+          const value = await record.wire.run(async (signal) => {
             const options = { signal: AbortSignal.any([signal, exec.signal]), timeout: config.toolCallTimeoutMs }
             const generation = record.wire.client
             // The SDK answers an unadvertised capability with the same empty page, but
@@ -377,9 +390,11 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
               default: return assertNever(request)
             }
           })
+          await machine?.protection.assertActive()
+          return machine ? machine.protection.sanitize(value) : value
         } catch (error) {
           exec.signal.throwIfAborted()
-          throw mcpRequestError(error, request.method, config.expandTemplates ? text => binding.redact(text) : undefined)
+          throw mcpRequestError(error, request.method, redact)
         }
       },
     },

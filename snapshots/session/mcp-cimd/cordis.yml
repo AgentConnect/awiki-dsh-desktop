@@ -1,0 +1,27 @@
+- id: credentials
+  disabled: false
+
+- insert:
+    - id: mcp-cimd
+      name: '@deepseek-ai/dsh-mcp-client'
+      inject: [credentials]
+      config:
+        transport: streamable-http
+        serverName: cimd
+        url: !!js process.env.DSH_CIMD_SNAPSHOT_ORIGIN + '/mcp'
+        failOnStartupError: true
+        reconnect:
+          enabled: false
+        authentication:
+          mode: cimd-client-credentials
+          provider: credentials
+          credentialRef: DSH_CIMD_SNAPSHOT_SIGNING_KEY
+          credential:
+            clientId: !!js process.env.DSH_CIMD_SNAPSHOT_ORIGIN + '/client.json'
+            keyId: snapshot-key
+            issuer: !!js process.env.DSH_CIMD_SNAPSHOT_ORIGIN
+            resource: !!js process.env.DSH_CIMD_SNAPSHOT_ORIGIN + '/mcp'
+          connectionId: cimd-snapshot
+          requestedScopes: [catalog.read]
+          stateRoot: !!js process.cwd() + '/.dsh/cimd-state'
+          encryptionKeyRef: DSH_CIMD_SNAPSHOT_STORAGE_KEY

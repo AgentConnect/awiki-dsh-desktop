@@ -14,6 +14,7 @@
  */
 
 import { Context, type Fiber } from '@deepseek-ai/cordis'
+import { isAbsolute } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -24,6 +25,10 @@ import type { ReconnectConfig } from './connection.ts'
 import { registerServerContext } from './server-context.ts'
 import { connectionStatusIn, registerStatusCell } from './status.ts'
 import type { McpConnectionStatusHandle } from './status.ts'
+import { McpLocalError } from './diagnostic.ts'
+import { machineManagedHeaders } from './machine-auth.ts'
+import { machineUrl } from './machine-http.ts'
+import type { MachineAuthentication } from './machine-types.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
 
@@ -36,6 +41,7 @@ export type { McpConnectionStatusHandle } from './status.ts'
 export type * from './types.ts'
 export { probeServer } from './probe.ts'
 export { assertTemplateSyntax } from './templates.ts'
+export { McpSigningProviderRegistry } from './signing-provider.ts'
 export type { McpProbeOptions } from './probe.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -120,6 +126,11 @@ export interface StreamableHttpConfig {
   url: string
   /** Additional headers attached to MCP requests. */
   headers: Record<string, string>
+  /** Optional Host-owned CIMD machine authentication. */
+  authentication?: {
+    /** Use the ordinary Streamable HTTP connection. */
+    mode: 'none'
+  } | MachineAuthentication
   /** Timeout per tool call or resource request in milliseconds. */
   toolCallTimeoutMs: number
   /** Optional budget for one connection attempt plus its initial tool sync, in milliseconds. */
@@ -181,6 +192,19 @@ export const Config = z.union([
     serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
     url: z.string().required(),
     headers: z.dict(String).default({}),
+    authentication: z.union([
+      z.object({ mode: z.const('none').required() }),
+      z.object({
+        mode: z.const('cimd-client-credentials').required(),
+        connectionId: z.string().required().pattern(/^[A-Za-z0-9_-]{1,128}$/u),
+        provider: z.string().required().pattern(/^[a-z][a-z0-9-]{0,63}$/u),
+        credentialRef: z.string().required(), issuer: z.string(),
+        credential: z.object({ clientId: z.string().required(), keyId: z.string().required(),
+          issuer: z.string().required(), resource: z.string().required() }),
+        requestedScopes: z.array(z.string().pattern(/^[\x21\x23-\x5b\x5d-\x7e]{1,128}$/u)).min(1).max(64).required(),
+        stateRoot: z.string().required(), encryptionKeyRef: z.string().required(),
+      }),
+    ]),
     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
     startupTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS),
     closeTimeoutMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).default(DEFAULT_CLOSE_TIMEOUT_MS),
@@ -207,6 +231,22 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // construction that bypassed Schemastery) rejects THIS instance before any
   // effect registers.
   const reconnect = resolveReconnectPolicy(config.reconnect, `mcp-client(${config.serverName}): reconnect`)
+  if (config.transport === 'streamable-http' && config.authentication && config.authentication.mode !== 'none') {
+    const auth = config.authentication
+    machineUrl(config.url)
+    if (auth.issuer !== undefined) machineUrl(auth.issuer)
+    if (config.expandTemplates || Object.keys(config.headers).some(name => machineManagedHeaders.test(name)) || !isAbsolute(auth.stateRoot)
+      || (auth.provider === 'credentials') !== (auth.credential !== undefined)
+      || (auth.credential && (auth.credential.resource !== config.url
+        || auth.issuer !== undefined && auth.credential.issuer !== auth.issuer))) {
+      throw new McpLocalError('CIMD requires an exact target, a configured signer, a protected state directory and Host-owned headers', 'MCP_MACHINE_CONFIGURATION')
+    }
+    if (auth.credential) machineUrl(auth.credential.issuer)
+    const service = `mcpMachineConnection:${auth.connectionId}`
+    const hostKeys = ctx[Context.root][Context.isolate]
+    hostKeys[service] ??= Symbol(service)
+    ctx.isolate(service, hostKeys[service]).provide(service, true)
+  }
 
   // Namespace reservations are scope-local; status belongs to the actual
   // Fiber and survives its reloads and final disposal.
@@ -226,7 +266,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     names.add(config.serverName)
     status = registerStatusCell(ctx.fiber, (message, error) => {
       ctx.logger.warn(`mcp-client(${config.serverName}): ${message}`)
-      if (!config.expandTemplates) ctx.logger.warn(error)
+      if (!config.expandTemplates && !(config.transport === 'streamable-http' && config.authentication?.mode === 'cimd-client-credentials')) ctx.logger.warn(error)
     })
     return () => {
       if (ctx.fiber.uid === null) status.detach()

@@ -4,6 +4,8 @@
  * @module @deepseek-ai/dsh-mcp-client/types
  */
 
+export type { McpSigningIdentity, McpSigningLease, McpSigningProvider, McpSigningTarget } from './machine-types.ts'
+
 /** Transport closure and local cleanup are reported independently. */
 export interface McpCloseResult {
   /** Transport closure is confirmed, or no transport was created; unfinished negotiation remains unconfirmed. */

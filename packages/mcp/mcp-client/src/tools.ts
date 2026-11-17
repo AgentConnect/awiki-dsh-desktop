@@ -25,9 +25,12 @@ import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
 import type { JsonSchemaNode } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { describeError, McpLocalError, mcpRequestError, McpToolError } from './diagnostic.ts'
+import type { MachineOutputProtection } from './machine-output.ts'
 
 /** Resolved options relevant to tool bridging. */
 export interface ToolBridgeOptions {
+  /** Host-only guard for machine-authenticated listings and results. */
+  protection?: MachineOutputProtection
   serverName: string
   toolCallTimeoutMs: number
   /** Generation cancellation combined with each tool execution's signal. */
@@ -141,11 +144,15 @@ export async function syncTools(
 ): Promise<ToolDisposers> {
   // Phase 1: fetch and build the next generation without touching the registry.
   const definitions = new Map<string, ToolDefinition>()
+  await opts.protection?.prepare?.()
   const response = client.getServerCapabilities()?.tools === undefined
     ? { tools: [] }
     : await client.listTools(undefined, { cacheMode: 'refresh', signal: opts.signal })
+  await opts.protection?.assertActive()
   const outputValidators = new AjvJsonSchemaValidator()
-  for (const tool of response.tools) {
+  for (const advertisedTool of response.tools) {
+    const tool = opts.protection ? opts.protection.sanitize(advertisedTool) : advertisedTool
+    if (tool.name !== advertisedTool.name) throw new McpToolRegistrationError('MCP tool name contains private credentials')
     const publicName = publicToolName(opts.serverName, tool.name)
     if (definitions.has(publicName)) {
       throw new Error(
@@ -176,19 +183,23 @@ export async function syncTools(
           throw invalidResult(`its output schema cannot be compiled: ${outputCheck.compileError}`)
         }
         let result: Awaited<ReturnType<Client['callTool']>>
+        const release = opts.protection?.begin()
         try {
+          await opts.protection?.prepare?.()
           result = await client.callTool(
             { name: tool.name, arguments: args },
             { signal: AbortSignal.any([execution.signal, opts.signal]),
               timeout: opts.toolCallTimeoutMs, toolDefinition: callDefinition },
           )
+          await opts.protection?.assertActive()
+          if (opts.protection) result = opts.protection.sanitize(result)
         } catch (error) {
           // The SDK reports an aborted signal as a request timeout; cancellation
           // and generation closure are reported as their own reasons instead.
           execution.signal.throwIfAborted()
           opts.signal.throwIfAborted()
           throw mcpRequestError(error, `tool "${tool.name}"`, opts.redact)
-        }
+        } finally { release?.() }
         if (result.isError !== true) {
           const failure = outputCheck === undefined ? undefined : outputCheck.check(result.structuredContent)
           if (failure !== undefined) throw invalidResult(failure)

@@ -1,0 +1,8 @@
+version: 1
+scenario: mcp-cimd
+profile: headless
+composition: mcp-cimd
+recording: authored
+header:
+  class: mcp-cimd
+  pin: true
